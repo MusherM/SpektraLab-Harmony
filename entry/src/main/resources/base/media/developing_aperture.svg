@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+  <path transform="rotate(0 24 24)" d="M24 3.5 A20.5 20.5 0 0 1 41.75 13.75 L32 24 L28 17.07 Z" fill="#F3C889"/>
+  <path transform="rotate(60 24 24)" d="M24 3.5 A20.5 20.5 0 0 1 41.75 13.75 L32 24 L28 17.07 Z" fill="#DBA667"/>
+  <path transform="rotate(120 24 24)" d="M24 3.5 A20.5 20.5 0 0 1 41.75 13.75 L32 24 L28 17.07 Z" fill="#BE8754"/>
+  <path transform="rotate(180 24 24)" d="M24 3.5 A20.5 20.5 0 0 1 41.75 13.75 L32 24 L28 17.07 Z" fill="#A07250"/>
+  <path transform="rotate(240 24 24)" d="M24 3.5 A20.5 20.5 0 0 1 41.75 13.75 L32 24 L28 17.07 Z" fill="#B78A62"/>
+  <path transform="rotate(300 24 24)" d="M24 3.5 A20.5 20.5 0 0 1 41.75 13.75 L32 24 L28 17.07 Z" fill="#DCB182"/>
+</svg>

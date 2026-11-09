@@ -1,0 +1,13 @@
+.build/
+entry/libs/
+entry/src/main/resources/rawfile/*
+!entry/src/main/resources/rawfile/materials/
+!entry/src/main/resources/rawfile/home/
+/dev/raw-samples/files/
+.hvigor/
+oh_modules/
+**/build/
+local.properties
+
+# Local DevEco signing configuration. Copy build-profile.example.json5 to configure a new checkout.
+/build-profile.json5

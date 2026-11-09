@@ -1,0 +1,75 @@
+--- vulkan_gpu.cpp
++++ vulkan_gpu.cpp
+@@ -175,7 +175,9 @@
+         VkApplicationInfo app{};
+         app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+         app.pApplicationName = "SpektraLab headless";
+-        app.apiVersion = VK_API_VERSION_1_0;
++        uint32_t loader_version = VK_API_VERSION_1_0;
++        if (vkEnumerateInstanceVersion) vkEnumerateInstanceVersion(&loader_version);
++        app.apiVersion = std::min(loader_version, uint32_t(VK_API_VERSION_1_1));
+         VkInstanceCreateInfo create{};
+         create.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+         create.pApplicationInfo = &app;
+@@ -252,6 +254,8 @@
+             }
+         }
+         if (!physical_) { error = "no Vulkan compute queue"; return false; }
++        dispatch_base_ = app.apiVersion >= VK_API_VERSION_1_1 && properties_.apiVersion >= VK_API_VERSION_1_1 &&
++                         vkCmdDispatchBase != nullptr;
+         storage_range_limit_ = properties_.limits.maxStorageBufferRange;
+         if (properties_.limits.maxComputeWorkGroupInvocations < kWorkgroup ||
+             properties_.limits.maxComputeWorkGroupSize[0] < kWorkgroup ||
+@@ -522,7 +526,8 @@
+         if (!b) return;
+         std::lock_guard<std::mutex> lock(buffers_mutex_);
+         if (b->refs <= 0) { ++audit_.over_releases; return; }
+-        if (--b->refs == 0 && b->persistent) {
++        // Dispatch is synchronous; release large idle planes immediately on mobile.
++        if (--b->refs == 0 && (b->persistent || b->bytes >= 16u * 1024 * 1024)) {
+             buffers_.erase(std::remove(buffers_.begin(), buffers_.end(), b), buffers_.end());
+             destroy_buffer(b);
+             delete b;
+@@ -667,17 +672,32 @@
+         }
+         vkUpdateDescriptorSets(device_, uint32_t(writes.size()), writes.data(), 0, nullptr);
+ 
+-        const bool submitted = submit_sync([&](VkCommandBuffer command) {
++        // These single-row kernels address independent lines or pixels by global ID.
++        // Finish each batch before submitting the next so display composition can run.
++        size_t batch = groups_x;
++        if (dispatch_base_ && groups_y == 1) {
++            if (std::strcmp(kernel, "spk_iir_df_acc") == 0) batch = 1;
++            else if (std::strcmp(kernel, "spk_grain_layers") == 0 ||
++                     std::strcmp(kernel, "spk_spectral_epilogue") == 0) batch = 256;
++        }
++        bool submitted = true;
++        for (size_t first = 0; first < groups_x && submitted; first += batch) {
++            const uint32_t count = uint32_t(std::min(batch, groups_x - first));
++            submitted = submit_sync([&](VkCommandBuffer command) {
+                 device_barrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+                 vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
+                 vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout,
+                                         0, 1, &set, 0, nullptr);
+-                vkCmdDispatch(command, uint32_t(groups_x), uint32_t(groups_y), 1);
++                if (first == 0) vkCmdDispatch(command, count, uint32_t(groups_y), 1);
++                else vkCmdDispatchBase(command, uint32_t(first), 0, 0, count, 1, 1);
+             }, "Vulkan compute dispatch", error);
++        }
+         vkDestroyDescriptorPool(device_, descriptor_pool, nullptr);
+         return submitted;
+     }
++
++    bool dispatch_base_ = false;
+ 
+     bool flush(std::string&) override { return true; }  // dispatch is synchronous for this milestone
+     void* texture(Buffer* buffer, uint32_t width, uint32_t height,
+@@ -1093,6 +1113,7 @@
+             stage.pSpecializationInfo = &special;
+             VkComputePipelineCreateInfo pipeline_create{};
+             pipeline_create.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
++            if (dispatch_base_) pipeline_create.flags |= VK_PIPELINE_CREATE_DISPATCH_BASE_BIT;
+             pipeline_create.stage = stage;
+             pipeline_create.layout = p.layout;
+             result = vkCreateComputePipelines(device_, VK_NULL_HANDLE, 1, &pipeline_create,

@@ -1,0 +1,5 @@
+胶卷插画改编自 donchico 的 Camera film roll，采用 CC0 1.0。此版本按胶片型号重绘配色、标签与背景。
+https://commons.wikimedia.org/wiki/File:Camera_film_roll.svg
+相纸插画使用 ambientCG 的 Paper001 色彩图，采用 CC0 1.0。此版本加入叠纸、型号标签和背景。
+https://ambientcg.com/view?id=Paper001
+https://creativecommons.org/publicdomain/zero/1.0/
