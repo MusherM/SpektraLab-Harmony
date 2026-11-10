@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-SpektraLab 是鸿蒙上的胶片暗房。导入照片或相机 RAW 原片，先选胶卷，再决定把它印在什么材料上。可以从 Kodak Gold 200 搭配 Portra Endura 相纸开始，也可以试试 Ektar 100 印到 Vision Premier 2393 电影正片上的效果。
+SpektraLab 现已上架鸿蒙应用商店。SpektraLab 是鸿蒙上的胶片暗房。导入照片或相机 RAW 原片，先选胶卷，再决定把它印在什么材料上。可以从 Kodak Gold 200 搭配 Portra Endura 相纸开始，也可以试试 Ektar 100 印到 Vision Premier 2393 电影正片上的效果。
 
 ![三张鸿蒙真机截图，从左到右分别是 Ektar 100 首页样张、雪山照片的选片界面，以及曝光与颗粒调整面板](dev/readme/darkroom.jpg)
 

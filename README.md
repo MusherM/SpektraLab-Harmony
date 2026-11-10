@@ -2,7 +2,7 @@
 
 中文：[README_zh.md](README_zh.md)
 
-SpektraLab is a film darkroom for HarmonyOS. Start with a photo or camera RAW file, then choose both the film stock and the material it prints onto. Try Kodak Gold 200 on Portra Endura paper, or pair Ektar 100 with Vision Premier 2393 motion-picture print film.
+SpektraLab is now available on the HarmonyOS app store. SpektraLab is a film darkroom for HarmonyOS. Start with a photo or camera RAW file, then choose both the film stock and the material it prints onto. Try Kodak Gold 200 on Portra Endura paper, or pair Ektar 100 with Vision Premier 2393 motion-picture print film.
 
 ![Three screens from the HarmonyOS app showing the Ektar 100 sample, film selection on a mountain photo, and exposure and grain controls](dev/readme/darkroom.jpg)
 
