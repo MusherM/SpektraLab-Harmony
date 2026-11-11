@@ -241,6 +241,7 @@ napi_value decodeRaw(napi_env env, napi_callback_info info) {
         const auto decodeStarted = std::chrono::steady_clock::now();
         auto raw = readRaw(fd, readText(env, args[1]), &warning);
         const auto displayStarted = std::chrono::steady_clock::now();
+        const double displayGain = harmony_raw::display_gain(raw->rgb);
         std::string rawInfo = raw->metadata.libraw_version + " | " +
             raw->metadata.make + " " + raw->metadata.model + " | " + raw->metadata.decoder_name +
             " | " + std::to_string(raw->width) + "x" + std::to_string(raw->height) +
@@ -262,12 +263,13 @@ napi_value decodeRaw(napi_env env, napi_callback_info info) {
             for (long x = 0; x < width; ++x) {
                 const size_t sx = (2 * x + 1) * raw->width / (2 * width);
                 std::copy_n(raw->rgb.data() + (sy * raw->width + sx) * 3, 3, out);
-                harmony_raw::display_pixel(out, rgba);
+                harmony_raw::display_pixel(out, rgba, displayGain);
                 out += 3;
                 rgba += 4;
             }
         }
-        rawInfo += " | decode_ms=" + std::to_string(std::chrono::duration<double, std::milli>(displayStarted - decodeStarted).count()) +
+        rawInfo += " | display_ev=" + std::to_string(std::log2(displayGain)) +
+            " | decode_ms=" + std::to_string(std::chrono::duration<double, std::milli>(displayStarted - decodeStarted).count()) +
             " | display_ms=" + std::to_string(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - displayStarted).count()) +
             " | workers=" + std::to_string(spk::io::raw_worker_limit());
         if (napi_create_object(env, &result) != napi_ok ||

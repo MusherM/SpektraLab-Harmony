@@ -4,9 +4,11 @@ import { exportTitle } from '../common/MaterialNames';
 import { horizontalAdjustment } from '../common/InteractionRules';
 import { AppLog } from '../common/AppLog';
 import { exportMime, exportExtension } from '../common/ExportFormat';
+import { straightPhotoPixels } from '../common/PhotoPixels';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { common } from '@kit.AbilityKit';
 import { image } from '@kit.ImageKit';
+import { colorSpaceManager } from '@kit.ArkGraphics2D';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { fileIo as fs, fileUri, picker } from '@kit.CoreFileKit';
 import { taskpool, util } from '@kit.ArkTS';
@@ -27,10 +29,10 @@ const COLLAPSED_HEIGHT: number = HANDLE_HEIGHT + 12;
 @Component
 struct DevelopingFilm {
   prominent: boolean = false;
+  onSaveHelp: () => void = () => {};
   @Prop @Watch('resetSaveHelp') label: string = '正在冲印';
   @State private angle: number = 0;
   @State private helpVisible: boolean = false;
-  @State private helpOpen: boolean = false;
   private helpTimer: number = -1;
 
   aboutToAppear(): void { this.resetSaveHelp(); }
@@ -38,14 +40,12 @@ struct DevelopingFilm {
   aboutToDisappear(): void {
     if (this.helpTimer !== -1) clearTimeout(this.helpTimer);
     this.helpTimer = -1;
-    this.helpOpen = false;
   }
 
   private resetSaveHelp(): void {
     if (this.helpTimer !== -1) clearTimeout(this.helpTimer);
     this.helpTimer = -1;
     this.helpVisible = false;
-    this.helpOpen = false;
     if (this.label !== '正在保存') return;
     this.helpTimer = setTimeout(() => {
       this.helpTimer = -1;
@@ -65,17 +65,8 @@ struct DevelopingFilm {
       .opacity(this.helpVisible ? 1 : 0).translate({x: this.helpVisible ? 1.5 : -4.5})
       .enabled(this.helpVisible).accessibilityLevel(this.helpVisible ? 'yes' : 'no')
       .accessibilityText('保存耗时说明')
-      .onClick(() => { this.helpOpen = !this.helpOpen; })
-      .bindPopup(this.helpOpen, {
-        message: '保存时，SpektraLab 会按照片的原始分辨率重新冲印，将胶片色彩、颗粒、光晕等效果计算到完整画面中，再生成照片并写入相册。原图的像素越多，处理时间通常越长。',
-        placement: Placement.Bottom,
-        enableArrow: true,
-        popupColor: '#FF353436',
-        backgroundBlurStyle: BlurStyle.NONE,
-        messageOptions: {textColor: '#F2ECE5'},
-        width: 300,
-        onStateChange: (event) => { this.helpOpen = event.isVisible; }
-      })
+      .id('save-help-button')
+      .onClick(() => { this.onSaveHelp(); })
   }
 
   @Builder
@@ -181,6 +172,7 @@ struct Index {
   @State private preview: image.PixelMap | undefined = undefined;
   @State private busy: boolean = true;
   @State private message: string = '';
+  @State private saveHelpOpen: boolean = false;
   private sourceUri: string = '';
   private sourceName: string = '';
   private pendingRecipe: HomeRecipe | undefined = undefined;
@@ -332,8 +324,12 @@ struct Index {
       const scale = preview ? Math.min(1, 2048 / Math.max(info.size.width, info.size.height)) : 1;
       const size: image.Size = { width: Math.max(1, Math.round(info.size.width * scale)),
         height: Math.max(1, Math.round(info.size.height * scale)) };
-      const map = await source.createPixelMap({desiredSize: size, editable: true, desiredPixelFormat: image.PixelMapFormat.RGBA_8888});
+      const map = await source.createPixelMap({ desiredSize: size, editable: true,
+        desiredPixelFormat: image.PixelMapFormat.RGBA_8888,
+        desiredDynamicRange: image.DecodingDynamicRange.SDR });
       try {
+        // Convert pixels before discarding the source's ICC/color-space metadata.
+        await map.applyColorSpace(colorSpaceManager.create(colorSpaceManager.ColorSpace.SRGB));
         let orientation = '1';
         try { orientation = await source.getImageProperty(image.PropertyKey.ORIENTATION); } catch (_) {}
         const names = ['Top-left','Top-right','Bottom-right','Bottom-left','Left-top','Right-top','Right-bottom','Left-bottom'];
@@ -343,9 +339,11 @@ struct Index {
         if (o === 3) await map.rotate(180);
         if (o === 5 || o === 8) await map.rotate(270);
         if (o === 6 || o === 7) await map.rotate(90);
-        const actual = (await map.getImageInfo()).size;
+        const decoded = await map.getImageInfo();
+        const actual = decoded.size;
         const buf = new ArrayBuffer(actual.width * actual.height * 4);
         await map.readPixelsToBuffer(buf);
+        straightPhotoPixels(buf, decoded.alphaType === image.AlphaType.PREMUL);
         return { pixels: buf, width: actual.width, height: actual.height };
       } finally { await map.release(); }
     } finally { await source.release(); }
@@ -697,7 +695,7 @@ struct Index {
         ))
       if ((this.message === '正在冲印' && !this.compare) || this.message === '正在保存') {
         Stack({alignContent: Alignment.Center}) {
-          DevelopingFilm({label: this.message})
+          DevelopingFilm({label: this.message, onSaveHelp: () => { this.saveHelpOpen = true; }})
         }.width('100%').height('100%').hitTestBehavior(HitTestMode.Transparent)
       }
       Button({type: ButtonType.Normal}) {
@@ -998,6 +996,7 @@ struct Index {
   }
 
   build() {
+    Stack() {
     Column() {
       if (this.choosingPhoto) {
         FormatPhotoPicker({onCancel: () => this.cancelPhoto(), onConfirm: (uri: string) => this.confirmPhoto(uri)})
@@ -1062,5 +1061,17 @@ struct Index {
         this.windowWidth = Number(b.width) - this.getUIContext().px2vp(this.leftInset + this.rightInset); }).backgroundColor('#171819')
       .padding({top: this.topInset + 'px', left: this.leftInset + 'px', right: this.rightInset + 'px',
         bottom: !this.choosingPhoto && this.original && !this.wide() ? 0 : this.bottomInset + 'px'})
+      if (this.saveHelpOpen) {
+        Column() {
+          Text('保存时，SpektraLab 会按照片的原始分辨率重新冲印，将胶片色彩、颗粒、光晕等效果计算到完整画面中，再生成照片并写入相册。原图的像素越多，处理时间通常越长。')
+            .fontSize(14).lineHeight(22).fontColor('#F2ECE5').padding(20)
+            .width('85%').constraintSize({maxWidth: 340})
+            .backgroundColor('#353436').borderRadius(CORNER_RADIUS)
+            .id('save-help-message')
+        }.width('100%').height('100%').justifyContent(FlexAlign.Center)
+          .backgroundColor('#66000000').id('save-help-overlay')
+          .onClick(() => { this.saveHelpOpen = false; })
+      }
+    }.width('100%').height('100%')
   }
 }

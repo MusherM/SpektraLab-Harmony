@@ -4,6 +4,11 @@
 #include <cmath>
 #include <memory>
 #include <stdexcept>
+#include <condition_variable>
+#include <deque>
+#include <future>
+#include <mutex>
+#include <thread>
 
 namespace harmony_raw {
 namespace {
@@ -65,7 +70,8 @@ spk::io::DecodedRaw daylight(const std::string& path) {
 }
 }
 
-spk::io::DecodedRaw decode(const std::string& path, std::string* warning) {
+namespace {
+spk::io::DecodedRaw decode_on_worker(const std::string& path, std::string* warning) {
     spk::io::RawDecodeThreadScope threads;
     if (warning) warning->clear();
     {
@@ -84,5 +90,70 @@ spk::io::DecodedRaw decode(const std::string& path, std::string* warning) {
     result = daylight(path);
     if (warning) *warning = "未读取到拍摄白平衡，已使用日光白平衡";
     return result;
+}
+
+struct DecodeResult {
+    spk::io::DecodedRaw raw;
+    std::string warning;
+};
+
+// With this SDK, retiring the first OpenMP caller clears runtime state and
+// later LibRaw critical sections fail. Keep that caller alive across tasks.
+class DecodeWorker {
+public:
+    DecodeWorker() : thread_([this] { loop(); }) {}
+    ~DecodeWorker() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopping_ = true;
+        }
+        ready_.notify_one();
+        thread_.join();
+    }
+
+    DecodeResult run(const std::string& path) {
+        std::packaged_task<DecodeResult()> task([path] {
+            DecodeResult result;
+            result.raw = decode_on_worker(path, &result.warning);
+            return result;
+        });
+        auto result = task.get_future();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            tasks_.push_back(std::move(task));
+        }
+        ready_.notify_one();
+        return result.get();
+    }
+
+private:
+    void loop() {
+        for (;;) {
+            std::packaged_task<DecodeResult()> task;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                ready_.wait(lock, [this] { return stopping_ || !tasks_.empty(); });
+                if (tasks_.empty()) return;
+                task = std::move(tasks_.front());
+                tasks_.pop_front();
+            }
+            task();
+        }
+    }
+
+    std::mutex mutex_;
+    std::condition_variable ready_;
+    std::deque<std::packaged_task<DecodeResult()>> tasks_;
+    bool stopping_ = false;
+    std::thread thread_;
+};
+}
+
+spk::io::DecodedRaw decode(const std::string& path, std::string* warning) {
+    static DecodeWorker worker;
+    if (warning) warning->clear();
+    auto result = worker.run(path);
+    if (warning) *warning = std::move(result.warning);
+    return std::move(result.raw);
 }
 }
