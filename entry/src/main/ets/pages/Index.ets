@@ -288,14 +288,14 @@ struct Index {
   private goodPaper: string = this.paper;
   private goodValues: number[] = [0, 1, 1, 1];
   private readonly labels: string[] = ['曝光', '颗粒', '光晕', '眩光'];
-  private readonly limits: number[] = [8, 2, 4, 30];
+  private readonly limits: number[] = [3, 2, 4, 30];
 
   private filmProfile(id: string): Stock {
     return this.films.find((stock: Stock) => stock.id === id)!;
   }
 
   private params(film: string, paper: string, linear: boolean, fullSize: boolean = false): string {
-    return JSON.stringify({ film_stock: film, print_stock: paper, scan_film: this.filmProfile(film).reversal,
+    return JSON.stringify({ product_defaults: true, film_stock: film, print_stock: paper, scan_film: this.filmProfile(film).reversal,
       exposure_compensation_ev: this.values[0], grain_active: true, grain_amount: this.values[1],
       halation_active: true, halation_amount: this.values[2], glare_active: true, glare_amount: this.values[3],
       auto_exposure: linear, input_color_space: linear ? 'ProPhoto RGB' : 'sRGB', input_cctf_decoding: !linear,
@@ -852,7 +852,7 @@ struct Index {
 
   @Builder
   adjustmentSlider(index: number, compact: boolean = false) {
-    Slider({value: this.values[index], min: index === 0 ? -8 : 0,
+    Slider({value: this.values[index], min: index === 0 ? -this.limits[0] : 0,
       max: this.limits[index], step: 0.1, style: SliderStyle.InSet})
       .width('100%').height(compact ? 34 : 44).trackThickness(compact ? 16 : 24)
       .blockSize({width: compact ? 12 : 18, height: compact ? 12 : 18})

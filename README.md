@@ -39,7 +39,7 @@ If your native SDK is outside DevEco Studio’s default macOS location, set `OHO
 
 - [HarmonyOS interface and editing workflow](entry/src/main/ets)
 - [Native renderer and RAW decoder](native)
-- [Version 1.0.0 release notes (Chinese)](dev/releases/1.0.0.md)
+- [Version 1.2.0 release notes](dev/releases/1.2.0_en.md)
 
 ## License and credits
 

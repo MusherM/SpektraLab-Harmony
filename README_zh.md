@@ -39,7 +39,7 @@ bash scripts/stage-app.sh
 
 - [鸿蒙界面与编辑流程](entry/src/main/ets)
 - [原生渲染与 RAW 解码](native)
-- [1.0.0 版本更新说明](dev/releases/1.0.0.md)
+- [1.2.0 版本更新说明](dev/releases/1.2.0.md)
 
 ## 许可与致谢
 
