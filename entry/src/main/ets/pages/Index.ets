@@ -298,7 +298,8 @@ struct Index {
     return JSON.stringify({ product_defaults: true, film_stock: film, print_stock: paper, scan_film: this.filmProfile(film).reversal,
       exposure_compensation_ev: this.values[0], grain_active: true, grain_amount: this.values[1],
       halation_active: true, halation_amount: this.values[2], glare_active: true, glare_amount: this.values[3],
-      auto_exposure: linear, input_color_space: linear ? 'ProPhoto RGB' : 'sRGB', input_cctf_decoding: !linear,
+      auto_exposure: true, auto_exposure_method: 'balanced',
+      input_color_space: linear ? 'ProPhoto RGB' : 'sRGB', input_cctf_decoding: !linear,
       output_color_space: 'sRGB', output_cctf_encoding: true,
       striped: fullSize, strip_rows: fullSize ? 256 : 0 });
   }

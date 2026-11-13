@@ -8,7 +8,6 @@
 #include <system_error>
 #include "raw_decode.hpp"
 #include "raw_display.hpp"
-#include "srgb_meter.hpp"
 #include <algorithm>
 #include <cmath>
 #include <memory>
@@ -107,10 +106,9 @@ napi_value render(napi_env env, napi_callback_info info) {
             session.reset(spk_open(engine, &input, params.c_str(), nullptr));
         } else {
             auto pixels = static_cast<const uint8_t*>(raw);
-            const double gain = srgb_meter::gain(pixels, w, h);
             std::vector<float> rgb(bytes / 4 * 3);
             for (size_t i = 0; i < bytes / 4; ++i)
-                for (size_t c = 0; c < 3; ++c) rgb[i * 3 + c] = pixels[i * 4 + c] * gain / 255.0;
+                for (size_t c = 0; c < 3; ++c) rgb[i * 3 + c] = pixels[i * 4 + c] / 255.0f;
             const spk_image input{rgb.data(), w, h, 3};
             session.reset(spk_open(engine, &input, params.c_str(), nullptr));
         }
