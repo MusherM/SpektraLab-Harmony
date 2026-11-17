@@ -2,6 +2,7 @@ import { curves } from '@kit.ArkUI';
 import { vibrator } from '@kit.SensorServiceKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { AppLog } from '../common/AppLog';
+import { homeDisplayCount, homePageCount, homeCardScale } from '../common/HomeGalleryRules';
 
 export interface HomeRecipe {
   id: string;
@@ -30,6 +31,27 @@ export const HOME_RECIPES: HomeRecipe[] = [{
   filmName: 'Kodak Gold 200', paperName: 'Portra Endura',
   filmHistory: 'Gold 200 延续了柯达消费级彩色负片的传统，陪伴人们记录旅行与家庭生活。',
   paperHistory: 'Portra Endura 在 2002 年接替 Portra III，以柔和反差呈现肤色，服务于人像、影楼与婚礼照片冲印。'
+}, {
+  id: 'portra-supra-endura', image: 'home/portra-160-supra-endura.jpg',
+  imageRatio: 1600 / 1070, imageDescription: '海岸沙丘、金色草地与蓝色海面',
+  film: 'kodak_portra_160', paper: 'kodak_supra_endura',
+  filmName: 'Kodak Portra 160', paperName: 'Supra Endura',
+  filmHistory: 'Portra 系列面向专业人像摄影。Portra 160 以细腻颗粒与柔和色彩见长，也适合记录海岸与旅行中的自然光。',
+  paperHistory: 'Supra Endura 是柯达专业彩色相纸，以适中的反差呈现丰富色彩。这组搭配保留海面的清凉蓝色与草地的暖金色。'
+}, {
+  id: 'hp5-multigrade', image: 'home/hp5-plus-multigrade.jpg',
+  imageRatio: 1600 / 1062, imageDescription: '黑白河畔建筑、岸边小径与水面倒影',
+  film: 'ilford_hp5_plus_400', paper: 'ilford_multigrade_iv_rc',
+  filmName: 'Ilford HP5 Plus 400', paperName: 'Multigrade IV RC',
+  filmHistory: 'HP5 Plus 是 Ilford 的 ISO 400 黑白负片，常用于街头、纪实与日常摄影，以鲜明的影调记录光线和纹理。',
+  paperHistory: 'Multigrade IV RC 是 Ilford 的可变反差黑白相纸。这组搭配突出建筑线条、岸边小径与水面纹理。'
+}, {
+  id: 'ektar-endura-premier', image: 'home/ektar-100-endura-premier.jpg',
+  imageRatio: 1600 / 1200, imageDescription: '绿色山林中的古堡与青蓝色远山',
+  film: 'kodak_ektar_100', paper: 'kodak_endura_premier',
+  filmName: 'Kodak Ektar 100', paperName: 'Endura Premier',
+  filmHistory: 'Ektar 100 将细腻颗粒与鲜明色彩结合，适合表现风光与建筑。这组航拍呈现深绿树林、青蓝远山与古堡轮廓。',
+  paperHistory: 'Endura Premier 是柯达专业彩色相纸，面向人像与商业照片冲印。这组搭配用浓郁色彩拉开山林的明暗层次。'
 }];
 
 @Component
@@ -37,8 +59,9 @@ export struct HomeGallery {
   @Prop ready: boolean = false;
   @Link currentIndex: number;
   @State private cardHeight: number = 640;
+  @State private displayCount: number = 1;
   onSelect: (recipe: HomeRecipe) => void = () => {};
-  @State private cardScales: number[] = [1, 1];
+  @State private cardScales: number[] = HOME_RECIPES.map(() => 1);
   private feedbackIndex: number = 0;
   private feedbackSource: string = 'none';
   private initialPageIndex: number = 0;
@@ -76,8 +99,9 @@ export struct HomeGallery {
 
   private scrubIndicator(event: GestureEvent): void {
     if (event.fingerList.length === 0) return;
-    const index = Math.max(0, Math.min(HOME_RECIPES.length - 1,
-      Math.floor(event.fingerList[0].localX / (80 / HOME_RECIPES.length))));
+    const pageCount = homePageCount(HOME_RECIPES.length, this.displayCount);
+    const index = Math.max(0, Math.min(pageCount - 1,
+      Math.floor(event.fingerList[0].localX / (80 / pageCount))));
     this.feedbackSource = 'indicator';
     if (index === this.indicatorTarget) return;
     this.indicatorTarget = index;
@@ -101,38 +125,49 @@ export struct HomeGallery {
   }
 
   @Builder
+  recipeContent(recipe: HomeRecipe) {
+    Column() {
+      Stack({alignContent: Alignment.BottomStart}) {
+        Image($rawfile(recipe.image)).width('100%').height(Math.max(180, this.cardHeight * 0.38))
+          .objectFit(ImageFit.Cover).draggable(false).accessibilityText(recipe.imageDescription)
+        Column() {}.width('100%').height(125)
+          .linearGradient({angle: 180, colors: [['#00242426', 0], ['#242426', 1]]})
+        Column({space: 3}) {
+          Text(recipe.filmName).fontSize(29).fontWeight(FontWeight.Bold).fontColor('#F1EDE7')
+          Text('× ' + recipe.paperName).fontSize(19).fontWeight(FontWeight.Medium).fontColor('#C8C1B8')
+        }.alignItems(HorizontalAlign.Start).padding({left: 18, right: 18, bottom: 12})
+      }.width('100%')
+      Column({space: this.displayCount > 1 ? (this.cardHeight < 560 ? 6 : 12) : 20}) {
+        Row({space: 16}) {
+          this.materialImage(recipe.film)
+          this.materialText(recipe.filmName, recipe.filmHistory)
+        }.width('100%').alignItems(VerticalAlign.Center)
+        Divider().color('#514D46').strokeWidth(0.5)
+        Row({space: 16}) {
+          this.materialText(recipe.paperName, recipe.paperHistory)
+          this.materialImage(recipe.paper)
+        }.width('100%').alignItems(VerticalAlign.Center)
+      }.width('100%').padding({left: 18, right: 18, top: this.displayCount > 1 ? 8 : 16,
+        bottom: this.displayCount > 1 ? 8 : 20})
+    }.width('100%').height(this.displayCount > 1 ? '100%' : undefined)
+      .constraintSize({minHeight: this.displayCount > 1 ? 0 : Math.max(0, this.cardHeight - 84)})
+      .justifyContent(this.displayCount > 1 ? FlexAlign.Start : FlexAlign.SpaceBetween)
+  }
+
+  @Builder
   recipeCard(recipe: HomeRecipe, index: number) {
     Column() {
-      Scroll() {
-        Column() {
-          Stack({alignContent: Alignment.BottomStart}) {
-            Image($rawfile(recipe.image)).width('100%').height(Math.max(180, this.cardHeight * 0.38))
-              .objectFit(ImageFit.Cover).draggable(false).accessibilityText(recipe.imageDescription)
-            Column() {}.width('100%').height(125)
-              .linearGradient({angle: 180, colors: [['#00242426', 0], ['#242426', 1]]})
-            Column({space: 3}) {
-              Text(recipe.filmName).fontSize(29).fontWeight(FontWeight.Bold).fontColor('#F1EDE7')
-              Text('× ' + recipe.paperName).fontSize(19).fontWeight(FontWeight.Medium).fontColor('#C8C1B8')
-            }.alignItems(HorizontalAlign.Start).padding({left: 18, right: 18, bottom: 12})
-          }.width('100%')
-          Column({space: 20}) {
-            Row({space: 16}) {
-              this.materialImage(recipe.film)
-              this.materialText(recipe.filmName, recipe.filmHistory)
-            }.width('100%').alignItems(VerticalAlign.Center)
-            Divider().color('#514D46').strokeWidth(0.5)
-            Row({space: 16}) {
-              this.materialText(recipe.paperName, recipe.paperHistory)
-              this.materialImage(recipe.paper)
-            }.width('100%').alignItems(VerticalAlign.Center)
-          }.width('100%').padding({left: 18, right: 18, top: 16, bottom: 20})
-        }.width('100%').constraintSize({minHeight: Math.max(0, this.cardHeight - 84)})
-          .justifyContent(FlexAlign.SpaceBetween)
-      }.width('100%').layoutWeight(1).scrollBar(BarState.Off)
+      if (this.displayCount > 1) {
+        Column() { this.recipeContent(recipe) }.width('100%').layoutWeight(1)
+      } else {
+        Scroll() { this.recipeContent(recipe) }
+          .width('100%').layoutWeight(1).scrollBar(BarState.Off)
+      }
       Button('冲印同款', {type: ButtonType.Normal})
         .fontSize(17).fontWeight(FontWeight.Medium).fontColor('#32271D')
         .height(48).width('calc(100% - 36vp)').borderRadius(10).backgroundColor('#EFBD70')
-        .margin({top: 12, bottom: 20}).enabled(this.ready).onClick(() => this.onSelect(recipe))
+        .margin({top: this.displayCount > 1 ? 8 : 12, bottom: this.displayCount > 1 ? 14 : 20})
+        .enabled(this.ready).onClick(() => this.onSelect(recipe))
         .accessibilityText('冲印同款，' + recipe.filmName + '，' + recipe.paperName)
     }.width('100%').height('100%').backgroundColor('#242426').borderRadius(16).clip(true)
       .renderGroup(true).scale({x: this.cardScales[index], y: this.cardScales[index]})
@@ -145,7 +180,8 @@ export struct HomeGallery {
           Stack() { this.recipeCard(recipe, index) }
             .width('100%').height('100%').padding({left: 14, right: 14, top: 12, bottom: 40})
         }, (recipe: HomeRecipe) => recipe.id)
-      }.width('100%').height('100%').index(this.initialPageIndex).loop(false).autoPlay(false)
+      }.width('100%').height('100%').index(this.currentIndex).loop(false).autoPlay(false)
+        .displayCount(this.displayCount)
         .itemSpace(8).curve(curves.springMotion(0.55, 0.68)).effectMode(EdgeEffect.Spring)
         .indicator(this.indicatorController)
         .onTouch((event: TouchEvent) => {
@@ -156,7 +192,7 @@ export struct HomeGallery {
           if (this.feedbackSource !== 'indicator') this.indicatorTarget = index;
         })
         .onContentDidScroll((_selected: number, index: number, position: number, length: number) => {
-          const scale = 1 - 0.045 * Math.min(1, Math.abs(position));
+          const scale = homeCardScale(position, this.displayCount);
           const scales = this.cardScales.slice();
           scales[index] = scale;
           this.cardScales = scales;
@@ -170,9 +206,19 @@ export struct HomeGallery {
           AppLog.record('home animation started target=' + target);
         })
         .onAnimationEnd((index: number) => { AppLog.record('home animation ended index=' + index); })
-        .onAreaChange((_old: Area, area: Area) => { this.cardHeight = Math.max(0, Number(area.height) - 52); })
+        .onAreaChange((_old: Area, area: Area) => {
+          this.cardHeight = Math.max(0, Number(area.height) - 52);
+          const count = homeDisplayCount(Number(area.width), HOME_RECIPES.length);
+          if (count === this.displayCount) return;
+          this.displayCount = count;
+          this.cardScales = HOME_RECIPES.map(() => 1);
+          this.currentIndex = Math.min(this.currentIndex, homePageCount(HOME_RECIPES.length, count) - 1);
+          this.feedbackIndex = this.currentIndex;
+          this.indicatorTarget = this.currentIndex;
+          AppLog.record('home layout width=' + area.width + ' cards=' + count);
+        })
       IndicatorComponent(this.indicatorController).initialIndex(this.initialPageIndex)
-        .count(HOME_RECIPES.length).loop(false).width(80).height(40)
+        .count(homePageCount(HOME_RECIPES.length, this.displayCount)).loop(false).width(80).height(40)
         .style(Indicator.dot().itemWidth(6).itemHeight(6).selectedItemWidth(22).selectedItemHeight(6)
           .color('#65615C').selectedColor('#EFBD70'))
         .onTouch((event: TouchEvent) => {
