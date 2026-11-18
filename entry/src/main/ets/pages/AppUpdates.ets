@@ -74,6 +74,7 @@ struct ReleaseNotesDialog {
 @Component
 export struct AppUpdates {
   controls: boolean = false;
+  onFeedback: () => void = () => {};
   @Prop @Watch('automaticCheck') ready: boolean = false;
   @State private checking: boolean = false;
   @State private message: string = '';
@@ -147,17 +148,26 @@ export struct AppUpdates {
     }
   }
 
+  @Styles
+  actionStyle() {
+    .layoutWeight(1).height(48).borderRadius(10).padding({left: 4, right: 4})
+    .backgroundColor('#303032')
+  }
+
   build() {
     if (this.controls) {
-      Column({space: 12}) {
-        Row({space: 10}) {
+      Column({space: 10}) {
+        Row({space: 8}) {
           Button(this.checking ? '正在检查' : '检查更新', {type: ButtonType.Normal})
-            .height(44).borderRadius(10).fontSize(16).backgroundColor('#303032').fontColor('#ECEAE5')
+            .actionStyle().fontSize(14).fontWeight(FontWeight.Medium).fontColor('#F1EDE7')
             .enabled(!this.checking).id('check-updates').onClick(() => { this.check(true); })
           Button('更新日志', {type: ButtonType.Normal})
-            .height(44).borderRadius(10).fontSize(16).backgroundColor('#303032').fontColor('#ECEAE5')
+            .actionStyle().fontSize(14).fontWeight(FontWeight.Medium).fontColor('#F1EDE7')
             .id('show-release-notes').onClick(() => { this.notes.open(); })
-        }.width('100%')
+          Button('反馈问题', {type: ButtonType.Normal})
+            .actionStyle().fontSize(14).fontWeight(FontWeight.Medium).fontColor('#F1EDE7')
+            .id('open-feedback').onClick(() => { this.onFeedback(); })
+        }.width('100%').constraintSize({maxWidth: 480})
         if (this.message) { Text(this.message).fontSize(14).fontColor('#C8BEB2').width('100%') }
       }.width('100%').alignItems(HorizontalAlign.Start)
     }
