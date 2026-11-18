@@ -1,9 +1,16 @@
 import { AppLog } from '../common/AppLog';
-import { UIAbility } from '@kit.AbilityKit';
+import { UIAbility, Want } from '@kit.AbilityKit';
+import BuildProfile from 'BuildProfile';
 import { preferences } from '@kit.ArkData';
 import { window } from '@kit.ArkUI';
 
 export default class EntryAbility extends UIAbility {
+  onCreate(want: Want): void {
+    if (BuildProfile.DEBUG) {
+      AppStorage.setOrCreate('updatePreviewAvailable', want.parameters?.['updatePreview'] === 'available');
+    }
+  }
+
   async onWindowStageCreate(stage: window.WindowStage): Promise<void> {
     AppLog.start(this.context.filesDir);
     try {
@@ -15,6 +22,7 @@ export default class EntryAbility extends UIAbility {
     try {
       await main.setWindowLayoutFullScreen(true);
       const safeInsets = (): void => {
+        AppStorage.setOrCreate('darkroomWindowHeight', main.getWindowProperties().windowRect.height);
         const system = main.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
         const gesture = main.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
         AppStorage.setOrCreate('darkroomTop', system.topRect.height);
@@ -24,6 +32,7 @@ export default class EntryAbility extends UIAbility {
       };
       safeInsets();
       main.on('avoidAreaChange', safeInsets);
+      main.on('windowSizeChange', safeInsets);
       await main.setWindowSystemBarProperties({ statusBarColor: '#171819', statusBarContentColor: '#EEEAE5',
         navigationBarColor: '#201F20', navigationBarContentColor: '#EEEAE5' });
     } finally {
