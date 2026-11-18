@@ -1,0 +1,115 @@
+{
+  "repository": "MusherM/SpektraLab-Harmony",
+  "app": "SpektraLab",
+  "version": "1.5.0",
+  "version_code": 10,
+  "previous": "1.4.0",
+  "date": "2026-11-18",
+  "source": "9ad270bd5556459772dfc7a8ac631e07ac685ab1",
+  "changes": [
+    "发现新版本时可前往应用商店更新；选择稍后可暂停自动提醒七天",
+    "设置页可手动检查更新，并查看当前版本日志"
+  ],
+  "store_notes": "发现新版本时可前往应用商店更新；选择“稍后”后，七天内暂停自动提醒，仍可在设置中手动检查。在设置中打开更新日志，即可查看当前版本的变化。",
+  "checks": [
+    {
+      "label": "release 构建通过；包内版本 1.5.0（10），调试模式关闭",
+      "status": "passed"
+    },
+    {
+      "label": "七天提醒、版本日志一致性与宽屏布局规则测试",
+      "status": "passed"
+    },
+    {
+      "label": "指定真机覆盖安装并启动",
+      "status": "passed"
+    },
+    {
+      "label": "发行 APP 整包签名、发行 profile 和未签名 HAP 验证",
+      "status": "passed"
+    },
+    {
+      "label": "AppGallery 鉴权、应用匹配与上传权限检查",
+      "status": "passed"
+    }
+  ],
+  "digests": {
+    "发行签名 APP": "cf0d67ad991a0f80cdb416bca19779ca64440bae0613d485234322c235d7d007",
+    "未签名 HAP": "65c56f8e7f6d15979fb16b8e5e049d53a36b97fbd1bfaf4877f8e43d831db515",
+    "完整材料清单": "ae8d0ecaa90de5972286e6e6b739fcd217ff8e06bce760f8f1d38d023339c620"
+  },
+  "scenes": [
+    {
+      "id": "E01",
+      "title": "直板屏：设置与 1.5.0 版本日志",
+      "evidence": {
+        "path": "dev/releases/evidence/1.5.0/e01.png",
+        "sha256": "a2c5980d18db8d1f8e7aa6da408c3ca0e148c536637ae5646fc441031d06dd42",
+        "source": "9ad270bd5556459772dfc7a8ac631e07ac685ab1",
+        "version": "1.5.0",
+        "mode": "release",
+        "device": "直板屏真机",
+        "captured_at": "2026-11-18 11:57",
+        "action": "在设置中打开更新日志",
+        "observed": "弹窗显示 1.5.0 及两项发行变化",
+        "result": "passed"
+      }
+    },
+    {
+      "id": "E02",
+      "title": "宽屏：发现新版本与更新提示布局",
+      "modes": [
+        "release",
+        "diagnostic"
+      ],
+      "evidence": {
+        "path": "dev/releases/evidence/1.5.0/e02.png",
+        "sha256": "85e22f3e70032ea5905557b22c5bbc06063f4feb32030b439b3ed43b6b8301c0",
+        "source": "9ad270bd5556459772dfc7a8ac631e07ac685ab1",
+        "version": "1.5.0",
+        "mode": "diagnostic",
+        "device": "宽屏真机",
+        "captured_at": "2026-11-18 11:57",
+        "action": "注入有更新状态后，在设置中手动检查",
+        "observed": "发现新版本弹窗居中显示，稍后与前往应用商店按钮完整可见",
+        "result": "passed"
+      }
+    },
+    {
+      "id": "E03",
+      "title": "AppGallery：打开 SpektraLab 商店详情",
+      "modes": [
+        "release",
+        "diagnostic"
+      ],
+      "evidence": {
+        "path": "dev/releases/evidence/1.5.0/e03.png",
+        "sha256": "26f59d3898b877b7859a2b943ad1c4c0967e0f6a32f70a8c1716bbffdad7ae35",
+        "source": "9ad270bd5556459772dfc7a8ac631e07ac685ab1",
+        "version": "1.5.0",
+        "mode": "diagnostic",
+        "device": "宽屏真机",
+        "captured_at": "2026-11-18 11:57",
+        "action": "点按前往应用商店并等待加载",
+        "observed": "进入 AppGallery 中真实的 SpektraLab 详情页",
+        "result": "passed"
+      }
+    },
+    {
+      "id": "E04",
+      "title": "设置：手动检查更新结果",
+      "evidence": {
+        "path": "dev/releases/evidence/1.5.0/e04.png",
+        "sha256": "a793ca3370d0e26a994012654cfdfb24407b8cd470348313fc3a385fb0d86ea5",
+        "source": "9ad270bd5556459772dfc7a8ac631e07ac685ab1",
+        "version": "1.5.0",
+        "mode": "release",
+        "device": "直板屏真机",
+        "captured_at": "2026-11-18 11:57",
+        "action": "在设置中点按检查更新",
+        "observed": "页面显示当前已是最新版本",
+        "result": "passed"
+      }
+    }
+  ]
+}
