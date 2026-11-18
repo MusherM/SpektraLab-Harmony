@@ -1,0 +1,120 @@
+{
+  "repository": "MusherM/SpektraLab-Harmony",
+  "app": "SpektraLab",
+  "version": "1.5.0",
+  "version_code": 10,
+  "previous": "1.4.0",
+  "date": "2026-11-18",
+  "source": "8eeca4e3a0f5382a4ac6b574c7acd7b20df6cea8",
+  "changes": [
+    "发现新版本时可前往应用商店更新；选择稍后可暂停自动提醒七天",
+    "设置页可手动检查更新，并查看当前版本日志",
+    "设置页将检查更新、更新日志与反馈问题放在版本号下方的同一行"
+  ],
+  "store_notes": "发现新版本时可前往应用商店更新；选择“稍后”后，七天内暂停自动提醒，仍可在设置中手动检查。在设置中打开更新日志，即可查看当前版本的变化。",
+  "checks": [
+    {
+      "label": "release 构建通过，包内版本为 1.5.0（10），调试模式关闭",
+      "status": "passed"
+    },
+    {
+      "label": "七天提醒规则和版本日志一致性测试通过",
+      "status": "passed"
+    },
+    {
+      "label": "同源码的签名调试包在指定真机覆盖安装并启动",
+      "status": "passed"
+    },
+    {
+      "label": "发行 APP 整包签名、AppGallery profile 和未签名 HAP 已核对",
+      "status": "passed"
+    },
+    {
+      "label": "AppGallery 鉴权、应用匹配与上传权限检查",
+      "status": "passed"
+    }
+  ],
+  "digests": {
+    "发行签名 APP": "ab983195ca52b130c5156e740110d3bf88c28f9d6501b51308042131b43fd936",
+    "未签名 HAP": "ae5a677c7e032d9a3a66249369926e7bda9dea781867811d9422ed4b211dbba8",
+    "完整材料清单": "4a3d0297006bd43fc2c674050239ce28aa3269ce17368ca59974f8999eed6d97"
+  },
+  "scenes": [
+    {
+      "id": "R2-01",
+      "title": "设置页三项操作",
+      "modes": [
+        "diagnostic"
+      ],
+      "evidence": {
+        "path": "dev/releases/evidence/1.5.0/r2-settings.png",
+        "sha256": "4e3f397659d4fe3189ed6aac691296cb76640fa390f24fb212aa4aaa678865b5",
+        "source": "8eeca4e3a0f5382a4ac6b574c7acd7b20df6cea8",
+        "version": "1.5.0",
+        "mode": "diagnostic",
+        "device": "直板屏真机",
+        "captured_at": "2026-11-18 15:21",
+        "action": "打开设置",
+        "observed": "版本号下方的三个按钮等宽、同高，按检查更新、更新日志、反馈问题排列",
+        "result": "passed"
+      }
+    },
+    {
+      "id": "R2-02",
+      "title": "版本日志",
+      "modes": [
+        "diagnostic"
+      ],
+      "evidence": {
+        "path": "dev/releases/evidence/1.5.0/r2-notes.png",
+        "sha256": "157ce8a3331d028b5f6acbb34a87e5e136257a32614d69f6ec2ba3d144b179c8",
+        "source": "8eeca4e3a0f5382a4ac6b574c7acd7b20df6cea8",
+        "version": "1.5.0",
+        "mode": "diagnostic",
+        "device": "直板屏真机",
+        "captured_at": "2026-11-18 15:21",
+        "action": "点按更新日志",
+        "observed": "弹窗显示 1.5.0 及两项发行更新",
+        "result": "passed"
+      }
+    },
+    {
+      "id": "R2-03",
+      "title": "手动检查更新",
+      "modes": [
+        "diagnostic"
+      ],
+      "evidence": {
+        "path": "dev/releases/evidence/1.5.0/r2-update.png",
+        "sha256": "162bc8ab3cf200a250d6eb91b526a8e2cb6b769990b3610cbba71c3ca96382ed",
+        "source": "8eeca4e3a0f5382a4ac6b574c7acd7b20df6cea8",
+        "version": "1.5.0",
+        "mode": "diagnostic",
+        "device": "直板屏真机",
+        "captured_at": "2026-11-18 15:22",
+        "action": "点按检查更新",
+        "observed": "按钮下方显示当前已是最新版本",
+        "result": "passed"
+      }
+    },
+    {
+      "id": "R2-04",
+      "title": "反馈入口",
+      "modes": [
+        "diagnostic"
+      ],
+      "evidence": {
+        "path": "dev/releases/evidence/1.5.0/r2-feedback.png",
+        "sha256": "0f6c5a3cf603729a3c89e59d3fd9ef552fb69244892c6eb8fe3e36394c6e88df",
+        "source": "8eeca4e3a0f5382a4ac6b574c7acd7b20df6cea8",
+        "version": "1.5.0",
+        "mode": "diagnostic",
+        "device": "直板屏真机",
+        "captured_at": "2026-11-18 15:22",
+        "action": "点按反馈问题",
+        "observed": "打开反馈页并显示问题描述输入框",
+        "result": "passed"
+      }
+    }
+  ]
+}

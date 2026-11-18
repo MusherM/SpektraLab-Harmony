@@ -1,5 +1,6 @@
 import { FormatPhotoPicker } from './FormatPhotoPicker';
 import { HomeGallery, HomeRecipe } from './HomeGallery';
+import { AppUpdates } from './AppUpdates';
 import { exportTitle } from '../common/MaterialNames';
 import { horizontalAdjustment } from '../common/InteractionRules';
 import { AppLog } from '../common/AppLog';
@@ -1062,6 +1063,7 @@ struct Index {
         this.windowWidth = Number(b.width) - this.getUIContext().px2vp(this.leftInset + this.rightInset); }).backgroundColor('#171819')
       .padding({top: this.topInset + 'px', left: this.leftInset + 'px', right: this.rightInset + 'px',
         bottom: !this.choosingPhoto && this.original && !this.wide() ? 0 : this.bottomInset + 'px'})
+      AppUpdates({ready: !this.busy && !this.rendering && !this.original && !this.choosingPhoto && !!this.assets})
       if (this.saveHelpOpen) {
         Column() {
           Text('保存时，SpektraLab 会按照片的原始分辨率重新冲印，将胶片色彩、颗粒、光晕等效果计算到完整画面中，再生成照片并写入相册。原图的像素越多，处理时间通常越长。')

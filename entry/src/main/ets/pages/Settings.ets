@@ -3,6 +3,7 @@ import { image } from '@kit.ImageKit';
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { VersionTapSequence } from '../common/InteractionRules';
+import { AppUpdates } from './AppUpdates';
 
 const REPOSITORY = 'https://github.com/JamesQiu2005/SpektraLab';
 
@@ -77,13 +78,14 @@ struct Settings {
             .padding({top: 10, bottom: 10}).onClick(() => {
               if (this.versionTaps.tap(Date.now())) this.getUIContext().getRouter().pushUrl({url: 'pages/Credits'});
             })
+          AppUpdates({
+            controls: true,
+            onFeedback: () => this.getUIContext().getRouter().pushUrl({url: 'pages/Feedback'})
+          })
           Divider().color('#454446').margin({top: 8, bottom: 8})
           Text('开源声明').fontSize(18).fontWeight(FontWeight.Medium).fontColor('#F1EDE7')
           Text('本应用基于开源项目 SpektraLab 开发。').fontSize(16).fontColor('#ECEAE5')
           Hyperlink(REPOSITORY, 'JamesQiu2005/SpektraLab').color('#EFBD70')
-          Divider().color('#454446').margin({top: 8, bottom: 8})
-          Button('反馈问题',{type: ButtonType.Normal}).borderRadius(10).backgroundColor('#EFBD70').fontColor('#32271D')
-            .onClick(() => this.getUIContext().getRouter().pushUrl({url: 'pages/Feedback'}))
         }.alignItems(HorizontalAlign.Start).width('100%').padding({top: 18, bottom: 18})
       }.layoutWeight(1).align(Alignment.TopStart)
     }.width('100%').height('100%').backgroundColor('#171819')
