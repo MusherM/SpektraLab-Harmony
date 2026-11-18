@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SpektraLab 1.5.0 发行审阅 · 北京时间 2026-11-18 10:34</title>
+<style>
+  :root{color-scheme:light;font:16px/1.65 system-ui,sans-serif;color:#27231f;background:#faf9f6}
+  body{max-width:58rem;margin:auto;padding:clamp(1rem,5vw,3rem)}
+  h1{line-height:1.2} h2{margin-top:2rem;font-size:1.25rem}
+  header,section{border-bottom:1px solid #dcd6ca;padding-bottom:1rem}
+  .status{color:#78490e;font-weight:650} code{overflow-wrap:anywhere}
+  dt{font-weight:650} dd{margin:0 0 .8rem}
+</style>
+<header>
+  <h1>SpektraLab 1.5.0 发行审阅</h1>
+  <p>北京时间 2026-11-18 10:34 · 版本号 10</p>
+  <p class="status">待审阅</p>
+  <p>构建源码：<code>9ad270bd5556459772dfc7a8ac631e07ac685ab1</code></p>
+</header>
+<main>
+  <section>
+    <h2>本次更新</h2>
+    <ul>
+      <li><strong>检查应用更新</strong>：发现新版本时可前往应用商店更新；选择“稍后”后，七天内暂停自动提醒，仍可在设置中手动检查。</li>
+      <li><strong>查看版本日志</strong>：在设置中打开更新日志，即可查看当前版本的变化。</li>
+    </ul>
+  </section>
+  <section>
+    <h2>验收结果</h2>
+    <dl>
+      <dt>构建</dt><dd>release 构建通过，包内版本为 1.5.0（10），调试模式关闭。</dd>
+      <dt>自动测试</dt><dd>七天提醒规则、期限边界、应用内版本日志一致性及首页宽屏布局规则通过。</dd>
+      <dt>真机</dt><dd>同一源码构建的设备签名 HAP 在项目指定设备上覆盖安装成功，系统登记版本为 1.5.0（10），应用启动命令返回成功。候选的更新弹窗和商店跳转交互待复核。</dd>
+      <dt>签名与权限</dt><dd>APP 整包签名校验通过，从 APP 提取的发行 profile 与原件一致，发行渠道、包名及应用标识匹配。HAP 验证确认无签名块。AppGallery 鉴权、应用匹配及上传权限检查通过。</dd>
+    </dl>
+  </section>
+  <section>
+    <h2>发行材料</h2>
+    <dl>
+      <dt>未签名 HAP · SHA-256</dt><dd><code>65c56f8e7f6d15979fb16b8e5e049d53a36b97fbd1bfaf4877f8e43d831db515</code></dd>
+      <dt>应用商店 APP · SHA-256</dt><dd><code>cf0d67ad991a0f80cdb416bca19779ca64440bae0613d485234322c235d7d007</code></dd>
+      <dt>完整材料清单 · SHA-256</dt><dd><code>ae8d0ecaa90de5972286e6e6b739fcd217ff8e06bce760f8f1d38d023339c620</code></dd>
+    </dl>
+  </section>
+  <section>
+    <h2>审阅与发布</h2>
+    <p>意见和批准记录在发行 PR。维护者批准并合并最终候选后，本机执行器校验材料，上传签名 APP、填写中文更新日志并提交华为应用商店审核。</p>
+  </section>
+</main>
+</html>
