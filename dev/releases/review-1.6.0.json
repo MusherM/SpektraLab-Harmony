@@ -1,0 +1,80 @@
+{
+  "repository": "MusherM/SpektraLab-Harmony",
+  "version": "1.6.0",
+  "version_code": 11,
+  "previous": "1.5.0",
+  "date": "2026-11-19 14:43（北京时间）",
+  "source": "cf2a38ad6be54839916935130ae63a71d0ee5445",
+  "app": "app.spektralab.musher",
+  "changes": [
+    "修复部分华为竖拍 DNG 的方向"
+  ],
+  "store_notes": "修复部分华为竖拍 DNG 的方向。导入预览和保存到相册的成片保持拍摄方向。",
+  "digests": {
+    "release 未签名 HAP": "85c8d1463325fe615cd000b2d3a6b840ed77fff00334049d4dce35b8083095a7",
+    "发行签名 APP": "e66cb9f01dfc2b55d0997157053cfcdbd15c1645497fca3eddfb51028daae7d7",
+    "中文更新日志": "02d4637c669cc93e7a5cd2d3f162a7fc72b6209d016d960cbdf026e45386d9bf",
+    "完整材料清单": "2607c82e2a678d8b7afa1e615c40842b2e4fc055b51b8547b6f04d7c49ee07a9",
+    "实机更新日志截图": "3b1f77fad1ea2bacee1c9b7cc7990b55981f7772fd32dad8197e64736e919ad9"
+  },
+  "checks": [
+    {
+      "label": "release 构建通过，包内版本为 1.6.0（11），调试模式关闭",
+      "status": "passed"
+    },
+    {
+      "label": "自动回归通过，覆盖照片像素、导出文件名、界面交互、更新规则和版本日志",
+      "status": "passed"
+    },
+    {
+      "label": "同一源码构建的签名调试包已在指定真机覆盖安装并启动",
+      "status": "passed"
+    },
+    {
+      "label": "三张华为 Mate 70 Air DNG 均完成导入、冲印和全尺寸 PNG 保存，已读回相册文件并核对朝向",
+      "status": "passed"
+    },
+    {
+      "label": "未签名 HAP 和发行 APP 的应用代码与原生库一致，APP 整包验签通过，profile 为 release / app_gallery",
+      "status": "passed"
+    },
+    {
+      "label": "AppGallery 鉴权、应用匹配、上传权限和本机材料清单校验通过",
+      "status": "passed"
+    }
+  ],
+  "scenes": [
+    {
+      "sample": "正向竖拍（相册导入）",
+      "clockwise_degrees": 90,
+      "preview_px": "1536×2048",
+      "export_png_px": "3072×4096",
+      "direction_matches_source": true
+    },
+    {
+      "sample": "反向竖拍（文件导入）",
+      "clockwise_degrees": 270,
+      "preview_px": "1536×2048",
+      "export_png_px": "3072×4096",
+      "direction_matches_source": true
+    },
+    {
+      "sample": "横拍（文件导入）",
+      "clockwise_degrees": 0,
+      "preview_px": "2048×1536",
+      "export_png_px": "4096×3072",
+      "direction_matches_source": true
+    },
+    {
+      "sample": "设置页更新日志",
+      "device": "直板屏真机",
+      "version": "1.6.0",
+      "mode": "debug",
+      "evidence": {
+        "path": "dev/releases/evidence/1.6.0/device-release-notes.png",
+        "sha256": "3b1f77fad1ea2bacee1c9b7cc7990b55981f7772fd32dad8197e64736e919ad9"
+      }
+    }
+  ],
+  "planned_store_action": "正式批准并合并后，核对 AppGallery 升级草稿，复用匹配的软件包或上传并绑定已验签的 1.6.0 APP，填写中文更新日志并提交审核。"
+}
