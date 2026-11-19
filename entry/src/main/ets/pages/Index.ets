@@ -6,6 +6,7 @@ import { horizontalAdjustment } from '../common/InteractionRules';
 import { AppLog } from '../common/AppLog';
 import { exportMime, exportExtension } from '../common/ExportFormat';
 import { straightPhotoPixels } from '../common/PhotoPixels';
+import { rawPreviewRotation, orientedPixelMap } from '../common/RawOrientation';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { common } from '@kit.AbilityKit';
 import { image } from '@kit.ImageKit';
@@ -111,11 +112,10 @@ interface Stock {
 }
 @Concurrent
 function renderPixels(path: string, input: ArrayBuffer, width: number, height: number,
-  params: string, linear: boolean): image.PixelMap {
+  params: string, linear: boolean, rotation: number): image.PixelMap {
   const rgba = linear ? nativeEngine.renderLinear(path, input, width, height, params) :
     nativeEngine.render(path, input, width, height, params);
-  return image.createPixelMapSync(rgba, { size: { width, height },
-    srcPixelFormat: image.PixelMapFormat.RGBA_8888, pixelFormat: image.PixelMapFormat.RGBA_8888 });
+  return orientedPixelMap(rgba, width, height, rotation);
 }
 
 @Concurrent
@@ -130,10 +130,9 @@ function clearNativeResources(releaseEngine: boolean): void { nativeEngine.clear
 function decodeRaw(fd: number, cacheDir: string): RawFrame { return nativeEngine.decodeRaw(fd, cacheDir); }
 
 @Concurrent
-function renderRawPrint(path: string, fd: number, params: string, cacheDir: string): image.PixelMap {
+function renderRawPrint(path: string, fd: number, params: string, cacheDir: string, rotation: number): image.PixelMap {
   const frame = nativeEngine.renderRaw(path, fd, params, cacheDir);
-  return image.createPixelMapSync(frame.pixels, { size: { width: frame.width, height: frame.height },
-    srcPixelFormat: image.PixelMapFormat.RGBA_8888, pixelFormat: image.PixelMapFormat.RGBA_8888 });
+  return orientedPixelMap(frame.pixels, frame.width, frame.height, rotation);
 }
 
 @CustomDialog
@@ -181,6 +180,7 @@ struct Index {
   private assets: string = '';
   private input: ArrayBuffer | undefined = undefined;
   private linear: boolean = false;
+  private rawRotation: number = 0;
   private widthPx: number = 0;
   private heightPx: number = 0;
 
@@ -309,14 +309,9 @@ struct Index {
     film: string, paper: string): Promise<image.PixelMap> {
     const pixels = input.slice(0);
     const task = new taskpool.Task(renderPixels, this.assets, pixels, w, h,
-      this.params(film, paper, linear), linear);
+      this.params(film, paper, linear), linear, this.rawRotation);
     task.setTransferList([pixels]);
     return await taskpool.execute(task) as image.PixelMap;
-  }
-
-  private makeMap(buf: ArrayBuffer, w: number, h: number): Promise<image.PixelMap> {
-    return image.createPixelMap(buf, { size: { width: w, height: h },
-      srcPixelFormat: image.PixelMapFormat.RGBA_8888, pixelFormat: image.PixelMapFormat.RGBA_8888 });
   }
 
   private async readPhoto(fd: number, preview: boolean): Promise<RawFrame> {
@@ -431,6 +426,7 @@ struct Index {
       const cacheDir = (this.getUIContext().getHostContext() as common.UIAbilityContext).cacheDir;
       const file = fs.openSync(uri, fs.OpenMode.READ_ONLY);
       let frame: RawFrame;
+      let rotation = 0;
       try {
         if (knownPhoto) {
           frame = await this.readPhoto(file.fd, true);
@@ -444,18 +440,23 @@ struct Index {
             frame = await this.readPhoto(file.fd, true);
           }
         }
+        if (raw && frame.displayPixels) {
+          rotation = await rawPreviewRotation(file.fd, frame.displayPixels, frame.width, frame.height);
+        }
       } finally { fs.closeSync(file); }
       const w = frame.width, h = frame.height;
       if (raw && !frame.displayPixels) throw new Error('RAW 预览数据缺失');
       const buf = frame.displayPixels ?? frame.pixels;
-      const original = await this.makeMap(buf, w, h);
+      const original = orientedPixelMap(buf, w, h, rotation);
       const oldOriginal = this.original;
       this.clearMaterials();
       this.sourceUri = uri;
       this.sourceName = name;
       this.input = frame.pixels; this.linear = raw; this.widthPx = w; this.heightPx = h;
+      this.rawRotation = rotation;
       this.original = original;
-      AppLog.record((raw ? 'import RAW complete ' : 'import photo complete ') + w + 'x' + h);
+      AppLog.record((raw ? 'import RAW complete ' : 'import photo complete ') +
+        (rotation ? h + 'x' + w + ' rotation=' + rotation : w + 'x' + h));
       this.compare = false; this.resetZoom(); this.dirty = false; this.matched = true;
       this.message = frame.warning ?? '';
       oldOriginal?.release();
@@ -526,10 +527,12 @@ struct Index {
     this.move(this.dx, this.dy);
   }
   private displayedWidth(): number {
-    return (!this.compare && this.framed) ? this.framed.getImageInfoSync().size.width : this.widthPx;
+    return (!this.compare && this.framed) ? this.framed.getImageInfoSync().size.width :
+      (this.rawRotation ? this.heightPx : this.widthPx);
   }
   private displayedHeight(): number {
-    return (!this.compare && this.framed) ? this.framed.getImageInfoSync().size.height : this.heightPx;
+    return (!this.compare && this.framed) ? this.framed.getImageInfoSync().size.height :
+      (this.rawRotation ? this.widthPx : this.heightPx);
   }
   private fittedScale(): number {
     return this.widthPx && this.heightPx ? Math.min(this.extentX / this.displayedWidth(), this.extentY / this.displayedHeight()) : 0;
@@ -556,6 +559,7 @@ struct Index {
     const preview = this.preview, original = this.original, framed = this.framed;
     this.preview = undefined; this.original = undefined; this.framed = undefined;
     this.sourceUri = ''; this.sourceName = ''; this.widthPx = 0; this.heightPx = 0; this.linear = false;
+    this.rawRotation = 0;
     this.film = ''; this.paper = ''; this.lastColorPaper = DEFAULT_PAPER;
     this.values = [0, 1, 1, 1]; this.frameEnabled = false;
     this.dirty = false; this.matched = false; this.message = '';
@@ -577,11 +581,12 @@ struct Index {
     const source = fs.openSync(this.sourceUri, fs.OpenMode.READ_ONLY);
     try {
       if (this.linear) {
-        return await taskpool.execute(new taskpool.Task(renderRawPrint, this.assets, source.fd, params, cacheDir), taskpool.Priority.HIGH) as image.PixelMap;
+        return await taskpool.execute(new taskpool.Task(renderRawPrint, this.assets, source.fd, params, cacheDir,
+          this.rawRotation), taskpool.Priority.HIGH) as image.PixelMap;
       }
       const frame = await this.readPhoto(source.fd, false);
       return await taskpool.execute(new taskpool.Task(renderPixels, this.assets, frame.pixels,
-        frame.width, frame.height, params, false), taskpool.Priority.HIGH) as image.PixelMap;
+        frame.width, frame.height, params, false, 0), taskpool.Priority.HIGH) as image.PixelMap;
     } finally { fs.closeSync(source); }
   }
 
