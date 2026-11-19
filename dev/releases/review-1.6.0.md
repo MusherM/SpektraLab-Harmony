@@ -20,6 +20,30 @@
 | 反向竖拍（文件导入） | 逆时针 90° | 1536×2048 | 3072×4096 |
 | 横拍（文件导入） | 0° | 2048×1536 | 4096×3072 |
 
+### 三张 RAW 的实测图
+
+北京时间 2026-11-19 14:48 补充，由 MusherM 请求。 [原审阅意见](https://github.com/MusherM/SpektraLab-Harmony/pull/3#pullrequestreview-5970515604)
+
+左列为 1.6.0 真机导入后的原图预览，右列为从相册读回的冲印成片。右列由实测 PNG 等比例缩小为 JPEG，原始导出尺寸见上表。
+
+#### 正向竖拍
+
+| 导入预览 | 导出成片 |
+| --- | --- |
+| ![正向竖拍的真机导入预览](evidence/1.6.0/original-preview.jpg) | ![正向竖拍的真机导出成片](evidence/1.6.0/original-export.jpg) |
+
+#### 反向竖拍
+
+| 导入预览 | 导出成片 |
+| --- | --- |
+| ![反向竖拍的真机导入预览](evidence/1.6.0/reverse-preview.jpg) | ![反向竖拍的真机导出成片](evidence/1.6.0/reverse-export.jpg) |
+
+#### 横拍
+
+| 导入预览 | 导出成片 |
+| --- | --- |
+| ![横拍的真机导入预览](evidence/1.6.0/landscape-preview.jpg) | ![横拍的真机导出成片](evidence/1.6.0/landscape-export.jpg) |
+
 设置页更新日志显示 1.6.0 及本版修复内容。截图已裁去系统状态栏。
 
 ![1.6.0 真机更新日志](evidence/1.6.0/device-release-notes.png)

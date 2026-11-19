@@ -49,21 +49,51 @@
       "clockwise_degrees": 90,
       "preview_px": "1536×2048",
       "export_png_px": "3072×4096",
-      "direction_matches_source": true
+      "direction_matches_source": true,
+      "images": {
+        "import_preview": {
+          "path": "dev/releases/evidence/1.6.0/original-preview.jpg",
+          "sha256": "f598d591107b8ba1c91af7fe8d11a1e75f994e4f536dbced7eb37b95df79a4fa"
+        },
+        "saved_export": {
+          "path": "dev/releases/evidence/1.6.0/original-export.jpg",
+          "sha256": "24ae95a577a8af6b121b3d35c19118e60e1d70b472245549bf94c029cc947516"
+        }
+      }
     },
     {
       "sample": "反向竖拍（文件导入）",
       "clockwise_degrees": 270,
       "preview_px": "1536×2048",
       "export_png_px": "3072×4096",
-      "direction_matches_source": true
+      "direction_matches_source": true,
+      "images": {
+        "import_preview": {
+          "path": "dev/releases/evidence/1.6.0/reverse-preview.jpg",
+          "sha256": "760b776972269c93bfba9e9f05654401aabae798b933088f59267932680906fb"
+        },
+        "saved_export": {
+          "path": "dev/releases/evidence/1.6.0/reverse-export.jpg",
+          "sha256": "febe3764d8d1910bf03cf4e6b9a053b3051c3894d0281895f316370f946d93b7"
+        }
+      }
     },
     {
       "sample": "横拍（文件导入）",
       "clockwise_degrees": 0,
       "preview_px": "2048×1536",
       "export_png_px": "4096×3072",
-      "direction_matches_source": true
+      "direction_matches_source": true,
+      "images": {
+        "import_preview": {
+          "path": "dev/releases/evidence/1.6.0/landscape-preview.jpg",
+          "sha256": "71440a40cf53eb007117f4c561afccdace87cee2e43036695fcd3cb8eb92881d"
+        },
+        "saved_export": {
+          "path": "dev/releases/evidence/1.6.0/landscape-export.jpg",
+          "sha256": "ab6d4701d25267df7d4af49d1ab2c83c10976401372905e8e24dd88e2d9a652a"
+        }
+      }
     },
     {
       "sample": "设置页更新日志",
@@ -76,5 +106,13 @@
       }
     }
   ],
-  "planned_store_action": "正式批准并合并后，核对 AppGallery 升级草稿，复用匹配的软件包或上传并绑定已验签的 1.6.0 APP，填写中文更新日志并提交审核。"
+  "planned_store_action": "正式批准并合并后，核对 AppGallery 升级草稿，复用匹配的软件包或上传并绑定已验签的 1.6.0 APP，填写中文更新日志并提交审核。",
+  "review_updates": [
+    {
+      "date": "2026-11-19 14:48（北京时间）",
+      "reviewer": "MusherM",
+      "review_url": "https://github.com/MusherM/SpektraLab-Harmony/pull/3#pullrequestreview-5970515604",
+      "result": "补充三张 RAW 的真机导入预览和相册导出成片，共六张配图。"
+    }
+  ]
 }
