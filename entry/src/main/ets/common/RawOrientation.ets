@@ -4,8 +4,8 @@ import { BusinessError } from '@kit.BasicServicesKit';
 
 const SAMPLE_SIDE = 32;
 
-export function orientedPixelMap(rgba: ArrayBuffer, width: number, height: number, rotation: number): image.PixelMap {
-  const map = image.createPixelMapSync(rgba, { size: { width, height }, editable: rotation !== 0,
+export function orientedPixelMap(rgba: ArrayBuffer, width: number, height: number, rotation: number, editable: boolean = false): image.PixelMap {
+  const map = image.createPixelMapSync(rgba, { size: { width, height }, editable: editable || rotation !== 0,
     srcPixelFormat: image.PixelMapFormat.RGBA_8888, pixelFormat: image.PixelMapFormat.RGBA_8888 });
   try {
     if (rotation) map.rotateSync(rotation);
