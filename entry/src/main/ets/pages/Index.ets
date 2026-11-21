@@ -1,3 +1,6 @@
+import { EDITOR_CORNER_RADIUS as CORNER_RADIUS } from '../common/EditorTheme';
+import { CropEditor } from './CropEditor';
+import { editedPhoto, fullPhoto, geometryMap, hasCrop, PhotoGeometry } from '../common/PhotoGeometry';
 import { FormatPhotoPicker } from './FormatPhotoPicker';
 import { HomeGallery, HomeRecipe } from './HomeGallery';
 import { AppUpdates } from './AppUpdates';
@@ -24,7 +27,6 @@ let resourceCleanup: Promise<void> = Promise.resolve();
 const DEFAULT_FILM: string = 'kodak_portra_400';
 const DEFAULT_PAPER: string = 'kodak_portra_endura';
 
-const CORNER_RADIUS: number = 10;
 const HANDLE_HEIGHT: number = 44;
 const COLLAPSED_HEIGHT: number = HANDLE_HEIGHT + 12;
 
@@ -112,10 +114,10 @@ interface Stock {
 }
 @Concurrent
 function renderPixels(path: string, input: ArrayBuffer, width: number, height: number,
-  params: string, linear: boolean, rotation: number): image.PixelMap {
+  params: string, linear: boolean, rotation: number, geometry: PhotoGeometry): image.PixelMap {
   const rgba = linear ? nativeEngine.renderLinear(path, input, width, height, params) :
     nativeEngine.render(path, input, width, height, params);
-  return orientedPixelMap(rgba, width, height, rotation);
+  return geometryMap(rgba, width, height, rotation, geometry);
 }
 
 @Concurrent
@@ -130,9 +132,10 @@ function clearNativeResources(releaseEngine: boolean): void { nativeEngine.clear
 function decodeRaw(fd: number, cacheDir: string): RawFrame { return nativeEngine.decodeRaw(fd, cacheDir); }
 
 @Concurrent
-function renderRawPrint(path: string, fd: number, params: string, cacheDir: string, rotation: number): image.PixelMap {
+function renderRawPrint(path: string, fd: number, params: string, cacheDir: string, rotation: number,
+  geometry: PhotoGeometry): image.PixelMap {
   const frame = nativeEngine.renderRaw(path, fd, params, cacheDir);
-  return orientedPixelMap(frame.pixels, frame.width, frame.height, rotation);
+  return geometryMap(frame.pixels, frame.width, frame.height, rotation, geometry);
 }
 
 @CustomDialog
@@ -309,7 +312,7 @@ struct Index {
     film: string, paper: string): Promise<image.PixelMap> {
     const pixels = input.slice(0);
     const task = new taskpool.Task(renderPixels, this.assets, pixels, w, h,
-      this.params(film, paper, linear), linear, this.rawRotation);
+      this.params(film, paper, linear), linear, this.rawRotation, fullPhoto());
     task.setTransferList([pixels]);
     return await taskpool.execute(task) as image.PixelMap;
   }
@@ -351,8 +354,70 @@ struct Index {
   @State private frameEnabled: boolean = false;
   @State private framed: image.PixelMap | undefined = undefined;
 
+  @State private cropOpen: boolean = false;
+  @State private croppedOriginal?: image.PixelMap = undefined;
+  @State private croppedPreview?: image.PixelMap = undefined;
+  private geometry: PhotoGeometry = fullPhoto();
+
+  private hasGeometry(): boolean { return this.geometry.angle !== 0 || hasCrop(this.geometry); }
+
   private printMap(): image.PixelMap | undefined {
-    return this.framed ?? this.preview ?? this.original;
+    return this.framed ?? this.croppedPreview ?? this.preview ?? this.croppedOriginal ?? this.original;
+  }
+
+  private displayedPhoto(): image.PixelMap | undefined {
+    return this.compare ? this.croppedOriginal ?? this.original : this.printMap();
+  }
+
+  private applyGeometry(next: PhotoGeometry): void {
+    if (!this.original) return;
+    const current = this.geometry;
+    if (current.angle === next.angle && current.left === next.left && current.top === next.top &&
+      current.right === next.right && current.bottom === next.bottom &&
+      (current.ratio === next.ratio || !hasCrop(next))) {
+      this.geometry = next;
+      this.cropOpen = false;
+      return;
+    }
+    let original: image.PixelMap | undefined;
+    let preview: image.PixelMap | undefined;
+    try {
+      original = editedPhoto(this.original, next);
+      if (this.preview) {
+        preview = editedPhoto(this.preview, next);
+        this.replaceFrame(preview ?? this.preview, this.goodFilm, this.frameEnabled);
+      }
+      const oldOriginal = this.croppedOriginal;
+      const oldPreview = this.croppedPreview;
+      this.croppedOriginal = original;
+      this.croppedPreview = preview;
+      this.geometry = next;
+      this.compare = false;
+      this.resetZoom();
+      this.dirty = true;
+      this.cropOpen = false;
+      this.message = '';
+      oldOriginal?.release();
+      oldPreview?.release();
+      AppLog.record('composition applied ' + this.displayedWidth() + 'x' + this.displayedHeight());
+    } catch (err) {
+      original?.release();
+      preview?.release();
+      AppLog.failure('composition', err as BusinessError);
+      this.cropOpen = false;
+      this.message = '裁切或旋转失败，请重试';
+    }
+  }
+
+  private resetGeometry(): void {
+    this.cropOpen = false;
+    this.geometry = fullPhoto();
+    const croppedOriginal = this.croppedOriginal;
+    const croppedPreview = this.croppedPreview;
+    this.croppedOriginal = undefined;
+    this.croppedPreview = undefined;
+    croppedOriginal?.release();
+    croppedPreview?.release();
   }
 
   private replaceFrame(photo: image.PixelMap, film: string, enabled: boolean): void {
@@ -365,7 +430,7 @@ struct Index {
   private toggleFrame(enabled: boolean): void {
     if (!this.preview) return;
     try {
-      this.replaceFrame(this.preview, this.goodFilm, enabled);
+      this.replaceFrame(this.croppedPreview ?? this.preview, this.goodFilm, enabled);
       this.frameEnabled = enabled;
       this.dirty = true;
     } catch (err) { AppLog.failure('frame', err as BusinessError); this.message = '相框生成失败，请重试'; }
@@ -449,6 +514,7 @@ struct Index {
       const buf = frame.displayPixels ?? frame.pixels;
       const original = orientedPixelMap(buf, w, h, rotation);
       const oldOriginal = this.original;
+      this.resetGeometry();
       this.clearMaterials();
       this.sourceUri = uri;
       this.sourceName = name;
@@ -491,9 +557,18 @@ struct Index {
       try {
         const next = await this.pixels(this.input, this.widthPx, this.heightPx, this.linear, this.film, this.paper);
         if (version !== this.version) { await next.release(); continue; }
-        try { this.replaceFrame(next, this.film, this.frameEnabled); }
-        catch (err) { await next.release(); throw new Error(String(err)); }
-        const old = this.preview; this.preview = next; old?.release();
+        let cropped: image.PixelMap | undefined;
+        try {
+          cropped = editedPhoto(next, this.geometry);
+          this.replaceFrame(cropped ?? next, this.film, this.frameEnabled);
+        } catch (err) {
+          await cropped?.release();
+          await next.release();
+          throw new Error(String(err));
+        }
+        const old = this.preview, oldCropped = this.croppedPreview;
+        this.preview = next; this.croppedPreview = cropped;
+        old?.release(); oldCropped?.release();
         this.goodFilm = this.film; this.goodPaper = this.paper; this.goodValues = sentValues;
         AppLog.record('render complete');
         this.dirty = true; this.matched = sentValues.every((v: number, i: number) => v === this.values[i]); this.message = '';
@@ -527,12 +602,10 @@ struct Index {
     this.move(this.dx, this.dy);
   }
   private displayedWidth(): number {
-    return (!this.compare && this.framed) ? this.framed.getImageInfoSync().size.width :
-      (this.rawRotation ? this.heightPx : this.widthPx);
+    return this.displayedPhoto()?.getImageInfoSync().size.width ?? 1;
   }
   private displayedHeight(): number {
-    return (!this.compare && this.framed) ? this.framed.getImageInfoSync().size.height :
-      (this.rawRotation ? this.widthPx : this.heightPx);
+    return this.displayedPhoto()?.getImageInfoSync().size.height ?? 1;
   }
   private fittedScale(): number {
     return this.widthPx && this.heightPx ? Math.min(this.extentX / this.displayedWidth(), this.extentY / this.displayedHeight()) : 0;
@@ -558,6 +631,7 @@ struct Index {
     this.input = undefined;
     const preview = this.preview, original = this.original, framed = this.framed;
     this.preview = undefined; this.original = undefined; this.framed = undefined;
+    this.resetGeometry();
     this.sourceUri = ''; this.sourceName = ''; this.widthPx = 0; this.heightPx = 0; this.linear = false;
     this.rawRotation = 0;
     this.film = ''; this.paper = ''; this.lastColorPaper = DEFAULT_PAPER;
@@ -569,6 +643,7 @@ struct Index {
 
   onBackPress(): boolean {
     if (this.choosingPhoto) { this.cancelPhoto(); return true; }
+    if (this.cropOpen) { this.cropOpen = false; return true; }
     if (this.busy) return true;
     if (!this.original) return false;
     if (!this.wide() && this.panel === 2) { this.snapPanel(1); return true; }
@@ -576,22 +651,30 @@ struct Index {
     else this.closePhoto();
     return true;
   }
-  private async renderOriginal(params: string): Promise<image.PixelMap> {
+  private async renderOriginal(params: string | undefined): Promise<image.PixelMap> {
     const cacheDir = (this.getUIContext().getHostContext() as common.UIAbilityContext).cacheDir;
     const source = fs.openSync(this.sourceUri, fs.OpenMode.READ_ONLY);
     try {
       if (this.linear) {
-        return await taskpool.execute(new taskpool.Task(renderRawPrint, this.assets, source.fd, params, cacheDir,
-          this.rawRotation), taskpool.Priority.HIGH) as image.PixelMap;
+        return await taskpool.execute(new taskpool.Task(renderRawPrint, this.assets, source.fd, params ?? '', cacheDir,
+          this.rawRotation, this.geometry), taskpool.Priority.HIGH) as image.PixelMap;
       }
       const frame = await this.readPhoto(source.fd, false);
+      if (params === undefined) {
+        return geometryMap(frame.pixels, frame.width, frame.height, 0, this.geometry);
+      }
       return await taskpool.execute(new taskpool.Task(renderPixels, this.assets, frame.pixels,
-        frame.width, frame.height, params, false, 0), taskpool.Priority.HIGH) as image.PixelMap;
+        frame.width, frame.height, params, false, 0, this.geometry), taskpool.Priority.HIGH) as image.PixelMap;
     } finally { fs.closeSync(source); }
   }
 
+  private canSave(): boolean {
+    return !!this.sourceUri && (this.hasMaterials() || (!this.linear && this.hasGeometry())) &&
+      this.matched && !this.busy && !this.rendering;
+  }
+
   private async save(): Promise<void> {
-    if (!this.sourceUri || !this.hasMaterials() || !this.matched || this.busy || this.rendering) return;
+    if (!this.canSave()) return;
     this.busy = true;
     this.message = '正在保存';
     const started = Date.now();
@@ -607,22 +690,22 @@ struct Index {
       const extension = exportExtension(mime);
       const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
       // Acquire the destination while the SaveButton grant is active.
+      const withMaterials = this.hasMaterials();
       const title = exportTitle(this.sourceName, this.film, this.paper);
       const uri = await photoAccessHelper.getPhotoAccessHelper(ctx).createAsset(
         photoAccessHelper.PhotoType.IMAGE, extension, {title: title});
       const savedName = new fileUri.FileUri(uri).name;
       destination = fs.openSync(uri, fs.OpenMode.WRITE_ONLY);
       AppLog.record('export destination ms=' + (Date.now() - started));
-      const name = this.filmProfile(this.film).name;
       const withFrame = this.frameEnabled;
       // A downsampled preview always has a 2048-pixel long edge.
       let output = Math.max(this.widthPx, this.heightPx) < 2048 ? this.printMap() : undefined;
       if (!output) {
         const renderStarted = Date.now();
-        print = await this.renderOriginal(this.params(this.film, this.paper, this.linear, true));
+        print = await this.renderOriginal(withMaterials ? this.params(this.film, this.paper, this.linear, true) : undefined);
         AppLog.record('export render ms=' + (Date.now() - renderStarted));
         if (withFrame) {
-          framed = await taskpool.execute(new taskpool.Task(frameExport, print, name), taskpool.Priority.HIGH) as image.PixelMap;
+          framed = await taskpool.execute(new taskpool.Task(frameExport, print, this.filmProfile(this.film).name), taskpool.Priority.HIGH) as image.PixelMap;
         }
         output = framed ?? print;
       }
@@ -685,7 +768,7 @@ struct Index {
   photo() {
     Stack({alignContent: Alignment.BottomEnd}) {
       Stack() {
-        Image(this.compare ? this.original : this.printMap())
+        Image(this.displayedPhoto())
           .width(this.displayedWidth() * this.fittedScale()).height(this.displayedHeight() * this.fittedScale())
           .objectFit(ImageFit.Contain).borderRadius(CORNER_RADIUS).clip(true)
           .scale({x: this.zoom, y: this.zoom}).translate({x: this.dx, y: this.dy})
@@ -705,13 +788,19 @@ struct Index {
           DevelopingFilm({label: this.message, onSaveHelp: () => { this.saveHelpOpen = true; }})
         }.width('100%').height('100%').hitTestBehavior(HitTestMode.Transparent)
       }
-      Button({type: ButtonType.Normal}) {
-        Image($r('app.media.compare_icon')).width(16).height(16)
-      }.width(36).height(30).borderRadius(CORNER_RADIUS).backgroundColor(this.compare ? '#B86A512F' : '#AD252425').margin(10)
-        .accessibilityText('按住查看原图，松开查看成片').onTouch(e => {
-          if (e.type === TouchType.Down) this.compare = true;
-          if (e.type === TouchType.Up || e.type === TouchType.Cancel) this.compare = false;
-        })
+      Row({space: 6}) {
+        Button('裁切', {type: ButtonType.Normal}).height(36).width(58).borderRadius(CORNER_RADIUS)
+          .fontSize(13).fontColor(this.hasGeometry() ? '#FFDA9E' : '#F2ECE5').backgroundColor('#AD252425')
+          .accessibilityText('裁切与旋转').enabled(!this.busy && !this.rendering)
+          .onClick(() => { this.compare = false; this.cropOpen = true; })
+        Button({type: ButtonType.Normal}) {
+          Image($r('app.media.compare_icon')).width(16).height(16)
+        }.width(36).height(36).borderRadius(CORNER_RADIUS).backgroundColor(this.compare ? '#B86A512F' : '#AD252425')
+          .accessibilityText('按住查看原图，松开查看成片').onTouch(e => {
+            if (e.type === TouchType.Down) this.compare = true;
+            if (e.type === TouchType.Up || e.type === TouchType.Cancel) this.compare = false;
+          })
+      }.margin(10)
     }.width('100%').layoutWeight(1).clip(true)
   }
 
@@ -721,12 +810,12 @@ struct Index {
     this.version++;
     this.film = ''; this.paper = ''; this.lastColorPaper = DEFAULT_PAPER;
     this.values = [0, 1, 1, 1]; this.frameEnabled = false;
-    const preview = this.preview, framed = this.framed;
-    this.preview = undefined; this.framed = undefined;
-    preview?.release(); framed?.release();
+    const preview = this.preview, framed = this.framed, cropped = this.croppedPreview;
+    this.preview = undefined; this.framed = undefined; this.croppedPreview = undefined;
+    preview?.release(); framed?.release(); cropped?.release();
     this.goodFilm = ''; this.goodPaper = ''; this.goodValues = this.values.slice();
     this.retryFilm = ''; this.retryPaper = ''; this.retryValues = [];
-    this.matched = true; this.dirty = false; this.message = ''; this.compare = false;
+    this.matched = true; this.dirty = this.hasGeometry(); this.message = ''; this.compare = false;
   }
 
   private selected(stock: Stock): boolean { return stock.id === (stock.paper ? this.paper : this.film); }
@@ -1007,6 +1096,15 @@ struct Index {
     Column() {
       if (this.choosingPhoto) {
         FormatPhotoPicker({onCancel: () => this.cancelPhoto(), onConfirm: (uri: string) => this.confirmPhoto(uri)})
+      } else if (this.cropOpen && this.original) {
+        CropEditor({
+          photo: this.preview ?? this.original,
+          sourceWidth: this.rawRotation ? this.heightPx : this.widthPx,
+          sourceHeight: this.rawRotation ? this.widthPx : this.heightPx,
+          geometry: this.geometry,
+          onCancel: () => { this.cropOpen = false; },
+          onApply: (geometry: PhotoGeometry) => this.applyGeometry(geometry)
+        })
       } else {
       Row() {
         Button({type: ButtonType.Normal}) {
@@ -1026,7 +1124,7 @@ struct Index {
           SaveButton({icon: SaveIconStyle.LINES, text: SaveDescription.SAVE, buttonType: ButtonType.Normal})
             .width(78).height(34).borderRadius(CORNER_RADIUS).backgroundColor('#EFBD70')
             .iconSize(16).iconColor('#32271D').fontSize(14).fontColor('#32271D').textIconSpace(6)
-            .enabled(this.hasMaterials() && this.matched && !this.busy && !this.rendering)
+            .enabled(this.canSave())
             .onClick((_event: ClickEvent, result: SaveButtonOnClickResult) => {
               if (result === SaveButtonOnClickResult.SUCCESS) this.save();
               else if (result === SaveButtonOnClickResult.TEMPORARY_AUTHORIZATION_FAILED) this.message = '保存授权失败，请重试';
@@ -1067,11 +1165,12 @@ struct Index {
     }.width('100%').height('100%').onAreaChange((_a, b) => { this.windowHeight = Number(b.height);
         this.windowWidth = Number(b.width) - this.getUIContext().px2vp(this.leftInset + this.rightInset); }).backgroundColor('#171819')
       .padding({top: this.topInset + 'px', left: this.leftInset + 'px', right: this.rightInset + 'px',
-        bottom: !this.choosingPhoto && this.original && !this.wide() ? 0 : this.bottomInset + 'px'})
+        bottom: !this.choosingPhoto && !this.cropOpen && this.original && !this.wide() ? 0 : this.bottomInset + 'px'})
       AppUpdates({ready: !this.busy && !this.rendering && !this.original && !this.choosingPhoto && !!this.assets})
       if (this.saveHelpOpen) {
         Column() {
-          Text('保存时，SpektraLab 会按照片的原始分辨率重新冲印，将胶片色彩、颗粒、光晕等效果计算到完整画面中，再生成照片并写入相册。原图的像素越多，处理时间通常越长。')
+          Text(this.hasMaterials() ? '保存时，SpektraLab 会按照片的原始分辨率重新冲印，将胶片色彩、颗粒、光晕等效果计算到完整画面中，再生成照片并写入相册。原图的像素越多，处理时间通常越长。' :
+            'SpektraLab 正在从原始照片生成裁切与旋转后的图片，并写入相册。')
             .fontSize(14).lineHeight(22).fontColor('#F2ECE5').padding(20)
             .width('85%').constraintSize({maxWidth: 340})
             .backgroundColor('#353436').borderRadius(CORNER_RADIUS)

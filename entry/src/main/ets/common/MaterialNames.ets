@@ -59,12 +59,12 @@ export function materialPairFromFilename(filename: string): MaterialPair | undef
 export function exportTitle(filename: string, filmId: string, paperId: string): string {
   const film = MATERIAL_NAMES.find((item: MaterialName) => !item.paper && item.id === filmId);
   const paper = MATERIAL_NAMES.find((item: MaterialName) => item.paper && item.id === paperId);
-  if (!film || !paper) throw new Error('材料文件名映射缺失');
+  if ((filmId || paperId) && (!film || !paper)) throw new Error('材料文件名映射缺失');
   let stem = filename.replace(/\.[^.]+$/, '');
   if (materialPairFromFilename(filename)) stem = stem.split('_').slice(0, -2).join('_');
   stem = stem.replace(/[\\/:*?"'`<>|{}\[\]\x00-\x1f]/g, '_').replace(/\.\.+/g, '_').trim();
   if (!stem) stem = 'photo';
-  const suffix = '_' + film.token + '_' + paper.token;
+  const suffix = film && paper ? '_' + film.token + '_' + paper.token : '_SpektraLab';
   // Leave room for the extension within the media library's filename limit.
   let base = '';
   let bytes = 0;
