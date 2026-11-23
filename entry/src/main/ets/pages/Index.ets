@@ -406,7 +406,8 @@ struct Index {
       original = editedPhoto(this.original, next);
       if (this.preview) preview = editedPhoto(this.preview, next);
       this.replaceFrame(preview ?? this.preview ?? original ?? this.original, this.preview ?? this.original,
-        this.goodFilm, next.angle);
+        this.goodFilm, false);
+      this.borderFramings.clear();
       const oldOriginal = this.croppedOriginal;
       const oldPreview = this.croppedPreview;
       this.croppedOriginal = original;
@@ -485,9 +486,9 @@ struct Index {
   }
 
   private replaceFrame(photo: image.PixelMap, full: image.PixelMap, film: string,
-    angle: number = this.geometry.angle): void {
+    useSavedFraming: boolean = true): void {
     const border = this.currentBorder();
-    const framing = this.framingFor(border, angle);
+    const framing = useSavedFraming ? this.framingFor(border) : undefined;
     this.setFramed(border.id ? composeBorder(framing ? full : photo, border, this.borderOverlay,
       this.borderFilm(film), 0, framing) : undefined);
   }
