@@ -1,0 +1,101 @@
+name: Regression tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ENGINE_REVISION: 445e314e28b9b455d2457471fadaffd28c07270b
+
+jobs:
+  editor:
+    name: Editor and RAW display
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: JamesQiu2005/SpektraLab
+          ref: ${{ env.ENGINE_REVISION }}
+          path: .build/engine
+          sparse-checkout: |
+            engine/resources/profiles
+            engine/resources_product/profiles
+          persist-credentials: false
+      - name: Generate the material catalog
+        shell: bash
+        run: |
+          jq -n -f scripts/stock-catalog.jq \
+            .build/engine/engine/resources/profiles/*.json \
+            .build/engine/engine/resources_product/profiles/*.json \
+            > entry/src/main/resources/rawfile/stocks.json
+      - name: Run editor regression tests
+        shell: bash
+        run: |
+          for test_file in scripts/test-*.mjs; do
+            node "$test_file"
+          done
+      - name: Test native RAW display
+        shell: bash
+        run: |
+          c++ -std=c++20 -O2 -Wall -Wextra scripts/test-raw-display.cpp -o "$RUNNER_TEMP/test-raw-display"
+          "$RUNNER_TEMP/test-raw-display"
+
+  raw:
+    name: RAW orientation and decode worker
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.11'
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: JamesQiu2005/SpektraLab
+          ref: ${{ env.ENGINE_REVISION }}
+          path: .build/engine
+          sparse-checkout: |
+            engine/setup-libraw.sh
+            engine/cmake/LibRaw.cmake
+            engine/src/io
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Check public RAW orientations
+        shell: bash
+        run: |
+          python -m pip install uv==0.13.9
+          uv run --no-project --python 3.11 --with pillow==12.3.0 --with rawpy==0.28.0 \
+            python scripts/raw_orientation.py --fixtures .build/ci-raw
+      - name: Compile and test the native RAW worker
+        shell: bash
+        env:
+          SPEKTRALAB_RAW_THREADS: '2'
+        run: |
+          if ! pkg-config --exists libjpeg; then
+            sudo apt-get update
+            sudo apt-get install -y libjpeg-dev
+          fi
+          libraw_source=$(bash .build/engine/engine/setup-libraw.sh .build/deps | tail -n 1)
+          cmake -S scripts/native-tests -B .build/raw-worker -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSPEKTRALAB_SOURCE_DIR="$PWD/.build/engine" \
+            -DSPEKTRALAB_LIBRAW_SOURCE="$libraw_source"
+          cmake --build .build/raw-worker --parallel 2
+          .build/raw-worker/test_raw_worker .build/ci-raw/02_Nikon_D750.NEF
