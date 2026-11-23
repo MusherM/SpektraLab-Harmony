@@ -877,6 +877,12 @@ struct Index {
     } finally { fs.closeSync(source); }
   }
 
+  private rawSaveHint(): string {
+    if (!this.original || !this.linear || this.hasMaterials()) return '';
+    if (!this.film && !this.paper) return '保存 RAW 前请先选择胶片和相纸';
+    return this.film ? '保存 RAW 前请先选择相纸' : '保存 RAW 前请先选择胶片';
+  }
+
   private canSave(): boolean {
     return !!this.sourceUri && (this.hasMaterials() || (!this.linear && (this.hasGeometry() || !!this.borderId))) &&
       this.matched && !this.busy && !this.rendering && !this.borderLoading;
@@ -1434,6 +1440,10 @@ struct Index {
             })
         } else { Blank().width(78) }
       }.height(54).width('100%').padding({left: 14, right: 14})
+      if (this.rawSaveHint()) {
+        Text(this.rawSaveHint()).id('raw-save-hint').fontSize(13).fontColor('#D9C4A8')
+          .width('100%').textAlign(TextAlign.End).padding({left: 14, right: 14, bottom: 8})
+      }
       Flex({direction: this.wide() ? FlexDirection.Row : FlexDirection.Column}) {
         Column() {
           if (this.importing) {
