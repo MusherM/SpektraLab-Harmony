@@ -5,6 +5,9 @@ import { FormatPhotoPicker } from './FormatPhotoPicker';
 import { HomeGallery, HomeRecipe } from './HomeGallery';
 import { AppUpdates } from './AppUpdates';
 import { exportTitle } from '../common/MaterialNames';
+import { centeredBorderFraming } from '../common/BorderFraming';
+import { materialOrder, moveVisibleMaterial } from '../common/MaterialOrder';
+import { preferences } from '@kit.ArkData';
 import { horizontalAdjustment } from '../common/InteractionRules';
 import { AppLog } from '../common/AppLog';
 import { exportMime, exportExtension } from '../common/ExportFormat';
@@ -17,7 +20,8 @@ import { colorSpaceManager } from '@kit.ArkGraphics2D';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { fileIo as fs, fileUri, picker } from '@kit.CoreFileKit';
 import { taskpool, util } from '@kit.ArkTS';
-import { framePrint } from './FilmFrame';
+import { availableFrameBorders, borderAperture, BUILT_IN_FRAME_BORDERS, composeBorder, FrameBorder, loadBorderOverlay, NO_FRAME } from './FrameBorders';
+import { FrameBorderCard } from './FrameBorderCard';
 import nativeEngine, { RawFrame } from 'libspektralab.so';
 
 import { curves, uiMaterial } from '@kit.ArkUI';
@@ -29,6 +33,8 @@ const DEFAULT_PAPER: string = 'kodak_portra_endura';
 
 const HANDLE_HEIGHT: number = 44;
 const COLLAPSED_HEIGHT: number = HANDLE_HEIGHT + 12;
+const BORDER_TAB: number = 2;
+const ADJUST_TAB: number = 3;
 
 @Component
 struct DevelopingFilm {
@@ -121,8 +127,9 @@ function renderPixels(path: string, input: ArrayBuffer, width: number, height: n
 }
 
 @Concurrent
-function frameExport(photo: image.PixelMap, name: string): image.PixelMap {
-  return framePrint(photo, name);
+function frameExport(photo: image.PixelMap, border: FrameBorder, overlay: image.PixelMap | undefined,
+  film: string, framing: PhotoGeometry | undefined): image.PixelMap {
+  return composeBorder(photo, border, overlay, film, 0, framing);
 }
 
 @Concurrent
@@ -215,6 +222,7 @@ struct Index {
         monochrome: false, targetPrint: DEFAULT_PAPER});
       this.papers.unshift({id: '', name: '未选中', paper: true, group: '', reversal: false,
         monochrome: false, targetPrint: DEFAULT_PAPER});
+      this.loadMaterialOrder(ctx);
       const dir = ctx.filesDir + '/assets-v1';
       if (!fs.accessSync(dir + '/ready')) {
         const list = decoder.decodeWithStream(await rm.getRawFileContent('engine-files.txt')).trim().split('\n');
@@ -260,7 +268,8 @@ struct Index {
   }
 
   private compactHeight(): number {
-    return Math.min(310, this.windowHeight * 0.45) + HANDLE_HEIGHT - 2;
+    return this.tab === BORDER_TAB ? Math.min(244, this.windowHeight * 0.42) :
+      Math.min(310, this.windowHeight * 0.45) + HANDLE_HEIGHT - 2;
   }
 
   private panelHeight(): number {
@@ -271,6 +280,7 @@ struct Index {
 
   private snapPanel(target: number): void {
     this.panel = target;
+    this.updateMaterialOrderHint();
     this.getUIContext().animateTo({curve: curves.interpolatingSpring(0, 1, 245, 23)}, () => {
       this.panelPosition = target;
     });
@@ -351,10 +361,21 @@ struct Index {
 
   @State private importing: boolean = false;
 
-  @State private frameEnabled: boolean = false;
+  @State private borderId: string = '';
+  @State private borderLoading: boolean = false;
+  @State private borderListWidth: number = 336;
+  private borderRequest: number = 0;
+  private borderOverlay?: image.PixelMap;
+  @State private borderSourceRevision: number = 0;
+  private borders: FrameBorder[] = BUILT_IN_FRAME_BORDERS;
+  @State private borderOrder: string[] = [];
+  @State private showBorderOrderHint: boolean = false;
+  private borderOrderHintSeen: boolean = false;
   @State private framed: image.PixelMap | undefined = undefined;
 
   @State private cropOpen: boolean = false;
+  @State private framingOpen: boolean = false;
+  private readonly borderFramings: Map<string, PhotoGeometry> = new Map<string, PhotoGeometry>();
   @State private croppedOriginal?: image.PixelMap = undefined;
   @State private croppedPreview?: image.PixelMap = undefined;
   private geometry: PhotoGeometry = fullPhoto();
@@ -362,7 +383,7 @@ struct Index {
   private hasGeometry(): boolean { return this.geometry.angle !== 0 || hasCrop(this.geometry); }
 
   private printMap(): image.PixelMap | undefined {
-    return this.framed ?? this.croppedPreview ?? this.preview ?? this.croppedOriginal ?? this.original;
+    return this.framed ?? this.borderBase();
   }
 
   private displayedPhoto(): image.PixelMap | undefined {
@@ -383,14 +404,15 @@ struct Index {
     let preview: image.PixelMap | undefined;
     try {
       original = editedPhoto(this.original, next);
-      if (this.preview) {
-        preview = editedPhoto(this.preview, next);
-        this.replaceFrame(preview ?? this.preview, this.goodFilm, this.frameEnabled);
-      }
+      if (this.preview) preview = editedPhoto(this.preview, next);
+      this.replaceFrame(preview ?? this.preview ?? original ?? this.original, this.preview ?? this.original,
+        this.goodFilm, false);
+      this.borderFramings.clear();
       const oldOriginal = this.croppedOriginal;
       const oldPreview = this.croppedPreview;
       this.croppedOriginal = original;
       this.croppedPreview = preview;
+      this.borderSourceRevision++;
       this.geometry = next;
       this.compare = false;
       this.resetZoom();
@@ -411,6 +433,7 @@ struct Index {
 
   private resetGeometry(): void {
     this.cropOpen = false;
+    this.framingOpen = false;
     this.geometry = fullPhoto();
     const croppedOriginal = this.croppedOriginal;
     const croppedPreview = this.croppedPreview;
@@ -420,20 +443,131 @@ struct Index {
     croppedPreview?.release();
   }
 
-  private replaceFrame(photo: image.PixelMap, film: string, enabled: boolean): void {
-    const next = enabled ? framePrint(photo, this.filmProfile(film).name) : undefined;
+  private borderBase(): image.PixelMap | undefined {
+    return this.croppedPreview ?? this.preview ?? this.croppedOriginal ?? this.original;
+  }
+
+  private currentBorder(): FrameBorder {
+    return this.borders.find((border: FrameBorder) => border.id === this.borderId) ?? NO_FRAME;
+  }
+
+  private borderFilm(film: string): string {
+    return this.filmProfile(film || DEFAULT_FILM).name;
+  }
+
+  private framingKey(border: FrameBorder, angle: number): string {
+    return border.id + ':' + angle;
+  }
+
+  private framingFor(border: FrameBorder, angle: number = this.geometry.angle): PhotoGeometry | undefined {
+    return this.borderFramings.get(this.framingKey(border, angle));
+  }
+
+  private canAdjustFraming(): boolean {
+    const border = this.currentBorder();
+    const aperture = borderAperture(border);
+    const size = this.borderBase()?.getImageInfoSync().size;
+    if (!aperture || !size) return false;
+    return !!this.framingFor(border) ||
+      Math.min(Math.abs(size.width - size.height * aperture), Math.abs(size.height - size.width / aperture)) > 1;
+  }
+
+  private defaultFraming(): PhotoGeometry {
+    const source = this.preview ?? this.original;
+    const size = source!.getImageInfoSync().size;
+    const aspect = this.geometry.angle % 180 === 0 ? size.width / size.height : size.height / size.width;
+    return centeredBorderFraming(this.geometry, borderAperture(this.currentBorder()), aspect);
+  }
+
+  private setFramed(next: image.PixelMap | undefined): void {
     const old = this.framed;
     this.framed = next;
     old?.release();
   }
 
-  private toggleFrame(enabled: boolean): void {
-    if (!this.preview) return;
+  private replaceFrame(photo: image.PixelMap, full: image.PixelMap, film: string,
+    useSavedFraming: boolean = true): void {
+    const border = this.currentBorder();
+    const framing = useSavedFraming ? this.framingFor(border) : undefined;
+    this.setFramed(border.id ? composeBorder(framing ? full : photo, border, this.borderOverlay,
+      this.borderFilm(film), 0, framing) : undefined);
+  }
+
+  private applyBorderFraming(next: PhotoGeometry): void {
+    const border = this.currentBorder();
+    const photo = this.borderBase();
+    const full = this.preview ?? this.original;
+    if (!photo || !full || !borderAperture(border)) return;
+    const initial = this.defaultFraming();
+    const isDefault = Math.abs(next.left - initial.left) < 1e-6 && Math.abs(next.right - initial.right) < 1e-6 &&
+      Math.abs(next.top - initial.top) < 1e-6 && Math.abs(next.bottom - initial.bottom) < 1e-6;
+    const key = this.framingKey(border, this.geometry.angle);
     try {
-      this.replaceFrame(this.croppedPreview ?? this.preview, this.goodFilm, enabled);
-      this.frameEnabled = enabled;
+      this.setFramed(composeBorder(isDefault ? photo : full, border, this.borderOverlay,
+        this.borderFilm(this.goodFilm), 0, isDefault ? undefined : next));
+      if (isDefault) this.borderFramings.delete(key);
+      else this.borderFramings.set(key, next);
+      this.borderSourceRevision++;
       this.dirty = true;
-    } catch (err) { AppLog.failure('frame', err as BusinessError); this.message = '相框生成失败，请重试'; }
+      this.resetZoom();
+      this.message = '';
+      this.framingOpen = false;
+      AppLog.record('border framing applied ' + border.id);
+    } catch (err) {
+      AppLog.failure('border framing', err as BusinessError);
+      this.framingOpen = false;
+      this.message = '边框取景应用失败，请重试';
+    }
+  }
+
+  private resetBorder(): void {
+    this.borderRequest++;
+    this.borderLoading = false;
+    this.borderId = '';
+    this.borderFramings.clear();
+    const framed = this.framed;
+    this.framed = undefined;
+    framed?.release();
+    this.borderOverlay?.release();
+    this.borderOverlay = undefined;
+  }
+
+  private async chooseBorder(border: FrameBorder): Promise<void> {
+    if (this.busy || this.rendering || !this.original) return;
+    if (!this.borderLoading && border.id === this.borderId) return;
+    const request = ++this.borderRequest;
+    this.borderLoading = true;
+    let overlay: image.PixelMap | undefined;
+    try {
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      overlay = await loadBorderOverlay(context.resourceManager, border);
+      const framing = this.framingFor(border);
+      const photo = framing ? this.preview ?? this.original : this.borderBase();
+      if (!photo || request !== this.borderRequest || !this.editorActive) return;
+      const next = border.id ? composeBorder(photo, border, overlay, this.borderFilm(this.goodFilm), 0, framing) :
+        undefined;
+      const old = this.framed;
+      const oldOverlay = this.borderOverlay;
+      this.framed = next;
+      this.borderOverlay = overlay;
+      overlay = undefined;
+      this.borderId = border.id;
+      this.compare = false;
+      this.resetZoom();
+      this.dirty = true;
+      if (!this.rendering) this.message = '';
+      old?.release();
+      oldOverlay?.release();
+      AppLog.record('border selected ' + (border.id || 'none') + ' ' + this.displayedWidth() + 'x' + this.displayedHeight());
+    } catch (err) {
+      if (request === this.borderRequest) {
+        AppLog.failure('border', err as BusinessError);
+        this.message = '边框生成失败，请重试';
+      }
+    } finally {
+      overlay?.release();
+      if (request === this.borderRequest) this.borderLoading = false;
+    }
   }
 
   @State private choosingPhoto: boolean = false;
@@ -515,12 +649,15 @@ struct Index {
       const original = orientedPixelMap(buf, w, h, rotation);
       const oldOriginal = this.original;
       this.resetGeometry();
+      this.resetBorder();
       this.clearMaterials();
       this.sourceUri = uri;
       this.sourceName = name;
       this.input = frame.pixels; this.linear = raw; this.widthPx = w; this.heightPx = h;
       this.rawRotation = rotation;
       this.original = original;
+      this.updateMaterialOrderHint();
+      this.borderSourceRevision++;
       AppLog.record((raw ? 'import RAW complete ' : 'import photo complete ') +
         (rotation ? h + 'x' + w + ' rotation=' + rotation : w + 'x' + h));
       this.compare = false; this.resetZoom(); this.dirty = false; this.matched = true;
@@ -560,7 +697,7 @@ struct Index {
         let cropped: image.PixelMap | undefined;
         try {
           cropped = editedPhoto(next, this.geometry);
-          this.replaceFrame(cropped ?? next, this.film, this.frameEnabled);
+          this.replaceFrame(cropped ?? next, next, this.film);
         } catch (err) {
           await cropped?.release();
           await next.release();
@@ -570,6 +707,7 @@ struct Index {
         this.preview = next; this.croppedPreview = cropped;
         old?.release(); oldCropped?.release();
         this.goodFilm = this.film; this.goodPaper = this.paper; this.goodValues = sentValues;
+        this.borderSourceRevision++;
         AppLog.record('render complete');
         this.dirty = true; this.matched = sentValues.every((v: number, i: number) => v === this.values[i]); this.message = '';
       } catch (err) {
@@ -587,14 +725,78 @@ struct Index {
 
   @State private cardWidth: number = 108;
   private lastColorPaper: string = DEFAULT_PAPER;
-  private readonly favorites: string[] = ['kodak_gold_200', 'kodak_portra_400', 'cinestill_800t'];
-  private stocks(full: boolean): Stock[] {
+  @State private filmOrder: string[] = [];
+  @State private paperOrder: string[] = [];
+  @State private showMaterialOrderHint: boolean = false;
+  private materialOrderHintSeen: boolean = false;
+  private materialSettings?: preferences.Preferences;
+
+  private loadMaterialOrder(context: common.UIAbilityContext): void {
+    const filmDefaults = ['kodak_gold_200', 'kodak_portra_400', 'cinestill_800t']
+      .concat(this.films.map((stock: Stock) => stock.id));
+    this.borders = availableFrameBorders(context.resourceManager);
+    const borderDefaults = this.borders.map((border: FrameBorder) => border.id);
+    this.borderOrder = borderDefaults.slice();
+    const paperDefaults = [DEFAULT_PAPER].concat(this.papers.map((stock: Stock) => stock.id));
+    this.filmOrder = materialOrder(filmDefaults, []);
+    this.paperOrder = materialOrder(paperDefaults, []);
+    try {
+      const settings = preferences.getPreferencesSync(context, {name: 'settings'});
+      this.materialSettings = settings;
+      this.materialOrderHintSeen = settings.getSync('materialOrderHintSeen', false) === true;
+      this.borderOrderHintSeen = settings.getSync('borderOrderHintSeen', false) === true;
+      this.borderOrder = materialOrder(borderDefaults, settings.getSync('borderOrder', []) as string[]);
+      this.filmOrder = materialOrder(filmDefaults, settings.getSync('filmOrder', []) as string[]);
+      this.paperOrder = materialOrder(paperDefaults, settings.getSync('paperOrder', []) as string[]);
+    } catch (err) { AppLog.failure('material order settings', err as BusinessError); }
+  }
+
+  private async saveMaterialPreference(key: string, value: string[] | boolean): Promise<void> {
+    try {
+      if (!this.materialSettings) return;
+      this.materialSettings.putSync(key, value);
+      await this.materialSettings.flush();
+    } catch (err) { AppLog.failure('material order save', err as BusinessError); }
+  }
+
+  private updateMaterialOrderHint(): void {
+    const expanded = !!this.original && (this.panel === 2 || this.wide());
+    if (!expanded || this.tab !== BORDER_TAB) {
+      this.showBorderOrderHint = false;
+    } else if (!this.borderOrderHintSeen) {
+      this.borderOrderHintSeen = true;
+      this.showBorderOrderHint = true;
+      this.saveMaterialPreference('borderOrderHintSeen', true);
+    }
+    if (!expanded || this.tab > 1) {
+      this.showMaterialOrderHint = false;
+    } else if (!this.materialOrderHintSeen) {
+      this.materialOrderHintSeen = true;
+      this.showMaterialOrderHint = true;
+      this.saveMaterialPreference('materialOrderHintSeen', true);
+    }
+  }
+
+  private orderedStocks(): Stock[] {
+    const paper = this.tab === 1;
+    const all = paper ? this.papers : this.films;
     const film = this.filmProfile(this.film);
-    const all = this.tab === 1 ? this.papers.filter((s: Stock) => !s.id || s.monochrome === film.monochrome) : this.films;
-    if (full) return all;
-    const ids: string[] = [''].concat(this.tab === 1 ? (film.monochrome ? [] : [DEFAULT_PAPER]) : this.favorites);
-    return ids.map((id: string) => all.find((s: Stock) => s.id === id)!)
-      .concat(all.filter((s: Stock) => !ids.includes(s.id)));
+    const ordered: Stock[] = [];
+    for (const id of paper ? this.paperOrder : this.filmOrder) {
+      const stock = all.find((item: Stock) => item.id === id);
+      if (stock && (!paper || stock.monochrome === film.monochrome)) ordered.push(stock);
+    }
+    return ordered;
+  }
+
+  private moveStock(from: number, to: number): void {
+    const paper = this.tab === 1;
+    const current = paper ? this.paperOrder : this.filmOrder;
+    const next = moveVisibleMaterial(current, this.orderedStocks().map((stock: Stock) => stock.id), from, to);
+    if (next === current) return;
+    if (paper) this.paperOrder = next;
+    else this.filmOrder = next;
+    this.saveMaterialPreference(paper ? 'paperOrder' : 'filmOrder', next);
   }
   private resetZoom(): void { this.zoom = 1; this.dx = 0; this.dy = 0; }
   private zoomTo(value: number): void {
@@ -608,7 +810,10 @@ struct Index {
     return this.displayedPhoto()?.getImageInfoSync().size.height ?? 1;
   }
   private fittedScale(): number {
-    return this.widthPx && this.heightPx ? Math.min(this.extentX / this.displayedWidth(), this.extentY / this.displayedHeight()) : 0;
+    if (!this.widthPx || !this.heightPx) return 0;
+    const gutter = this.framed && !this.compare ? 16 : 0;
+    return Math.min(Math.max(0, this.extentX - gutter) / this.displayedWidth(),
+      Math.max(0, this.extentY - gutter) / this.displayedHeight());
   }
   private move(x: number, y: number): void {
     const scale = this.fittedScale();
@@ -618,6 +823,7 @@ struct Index {
   }
   private changeTab(index: number): void {
     this.tab = index;
+    this.updateMaterialOrderHint();
   }
   private leaveDialog: CustomDialogController = new CustomDialogController({
     builder: LeaveEditorDialog({discard: () => this.closePhoto()}),
@@ -629,21 +835,24 @@ struct Index {
     // Invalidate any render still running before releasing its preview.
     this.version++;
     this.input = undefined;
-    const preview = this.preview, original = this.original, framed = this.framed;
-    this.preview = undefined; this.original = undefined; this.framed = undefined;
+    const preview = this.preview, original = this.original;
+    this.preview = undefined; this.original = undefined;
+    this.resetBorder();
     this.resetGeometry();
     this.sourceUri = ''; this.sourceName = ''; this.widthPx = 0; this.heightPx = 0; this.linear = false;
     this.rawRotation = 0;
     this.film = ''; this.paper = ''; this.lastColorPaper = DEFAULT_PAPER;
-    this.values = [0, 1, 1, 1]; this.frameEnabled = false;
+    this.values = [0, 1, 1, 1];
     this.dirty = false; this.matched = false; this.message = '';
     this.tab = 0; this.panel = 1; this.panelPosition = 1; this.compare = false; this.resetZoom();
-    preview?.release(); original?.release(); framed?.release();
+    this.updateMaterialOrderHint();
+    preview?.release(); original?.release();
   }
 
   onBackPress(): boolean {
     if (this.choosingPhoto) { this.cancelPhoto(); return true; }
     if (this.cropOpen) { this.cropOpen = false; return true; }
+    if (this.framingOpen) { this.framingOpen = false; return true; }
     if (this.busy) return true;
     if (!this.original) return false;
     if (!this.wide() && this.panel === 2) { this.snapPanel(1); return true; }
@@ -651,26 +860,32 @@ struct Index {
     else this.closePhoto();
     return true;
   }
-  private async renderOriginal(params: string | undefined): Promise<image.PixelMap> {
+  private async renderOriginal(params: string | undefined, geometry: PhotoGeometry): Promise<image.PixelMap> {
     const cacheDir = (this.getUIContext().getHostContext() as common.UIAbilityContext).cacheDir;
     const source = fs.openSync(this.sourceUri, fs.OpenMode.READ_ONLY);
     try {
       if (this.linear) {
         return await taskpool.execute(new taskpool.Task(renderRawPrint, this.assets, source.fd, params ?? '', cacheDir,
-          this.rawRotation, this.geometry), taskpool.Priority.HIGH) as image.PixelMap;
+          this.rawRotation, geometry), taskpool.Priority.HIGH) as image.PixelMap;
       }
       const frame = await this.readPhoto(source.fd, false);
       if (params === undefined) {
-        return geometryMap(frame.pixels, frame.width, frame.height, 0, this.geometry);
+        return geometryMap(frame.pixels, frame.width, frame.height, 0, geometry);
       }
       return await taskpool.execute(new taskpool.Task(renderPixels, this.assets, frame.pixels,
-        frame.width, frame.height, params, false, 0, this.geometry), taskpool.Priority.HIGH) as image.PixelMap;
+        frame.width, frame.height, params, false, 0, geometry), taskpool.Priority.HIGH) as image.PixelMap;
     } finally { fs.closeSync(source); }
   }
 
+  private rawSaveHint(): string {
+    if (!this.original || !this.linear || this.hasMaterials()) return '';
+    if (!this.film && !this.paper) return '保存 RAW 前请先选择胶片和相纸';
+    return this.film ? '保存 RAW 前请先选择相纸' : '保存 RAW 前请先选择胶片';
+  }
+
   private canSave(): boolean {
-    return !!this.sourceUri && (this.hasMaterials() || (!this.linear && this.hasGeometry())) &&
-      this.matched && !this.busy && !this.rendering;
+    return !!this.sourceUri && (this.hasMaterials() || (!this.linear && (this.hasGeometry() || !!this.borderId))) &&
+      this.matched && !this.busy && !this.rendering && !this.borderLoading;
   }
 
   private async save(): Promise<void> {
@@ -697,15 +912,19 @@ struct Index {
       const savedName = new fileUri.FileUri(uri).name;
       destination = fs.openSync(uri, fs.OpenMode.WRITE_ONLY);
       AppLog.record('export destination ms=' + (Date.now() - started));
-      const withFrame = this.frameEnabled;
+      const border = this.currentBorder();
+      const framing = this.framingFor(border);
+      AppLog.record('export border ' + (border.id || 'none'));
       // A downsampled preview always has a 2048-pixel long edge.
       let output = Math.max(this.widthPx, this.heightPx) < 2048 ? this.printMap() : undefined;
       if (!output) {
         const renderStarted = Date.now();
-        print = await this.renderOriginal(withMaterials ? this.params(this.film, this.paper, this.linear, true) : undefined);
+        print = await this.renderOriginal(withMaterials ? this.params(this.film, this.paper, this.linear, true) :
+          undefined, framing ? fullPhoto() : this.geometry);
         AppLog.record('export render ms=' + (Date.now() - renderStarted));
-        if (withFrame) {
-          framed = await taskpool.execute(new taskpool.Task(frameExport, print, this.filmProfile(this.film).name), taskpool.Priority.HIGH) as image.PixelMap;
+        if (border.id) {
+          framed = await taskpool.execute(new taskpool.Task(frameExport, print, border, this.borderOverlay,
+            this.borderFilm(this.film), framing), taskpool.Priority.HIGH) as image.PixelMap;
         }
         output = framed ?? print;
       }
@@ -770,7 +989,7 @@ struct Index {
       Stack() {
         Image(this.displayedPhoto())
           .width(this.displayedWidth() * this.fittedScale()).height(this.displayedHeight() * this.fittedScale())
-          .objectFit(ImageFit.Contain).borderRadius(CORNER_RADIUS).clip(true)
+          .objectFit(ImageFit.Contain).borderRadius(this.framed && !this.compare ? 0 : CORNER_RADIUS).clip(true)
           .scale({x: this.zoom, y: this.zoom}).translate({x: this.dx, y: this.dy})
       }.width('100%').height('100%').borderRadius(CORNER_RADIUS).clip(true)
         .onAreaChange((_a, b) => { this.extentX = Number(b.width); this.extentY = Number(b.height); this.move(this.dx, this.dy); })
@@ -789,10 +1008,17 @@ struct Index {
         }.width('100%').height('100%').hitTestBehavior(HitTestMode.Transparent)
       }
       Row({space: 6}) {
-        Button('裁切', {type: ButtonType.Normal}).height(36).width(58).borderRadius(CORNER_RADIUS)
-          .fontSize(13).fontColor(this.hasGeometry() ? '#FFDA9E' : '#F2ECE5').backgroundColor('#AD252425')
-          .accessibilityText('裁切与旋转').enabled(!this.busy && !this.rendering)
-          .onClick(() => { this.compare = false; this.cropOpen = true; })
+        Button(this.canAdjustFraming() ? '调整取景' : '裁切', {type: ButtonType.Normal})
+          .id('photo-crop-action').height(36).width(this.canAdjustFraming() ? 82 : 58).borderRadius(CORNER_RADIUS)
+          .padding({left: 8, right: 8})
+          .fontSize(13).fontColor(this.hasGeometry() || this.framingFor(this.currentBorder()) ? '#FFDA9E' : '#F2ECE5')
+          .backgroundColor('#AD252425').accessibilityText(this.canAdjustFraming() ? '调整边框取景' : '裁切与旋转')
+          .enabled(!this.busy && !this.rendering && !this.borderLoading)
+          .onClick(() => {
+            this.compare = false;
+            if (this.canAdjustFraming()) this.framingOpen = true;
+            else this.cropOpen = true;
+          })
         Button({type: ButtonType.Normal}) {
           Image($r('app.media.compare_icon')).width(16).height(16)
         }.width(36).height(36).borderRadius(CORNER_RADIUS).backgroundColor(this.compare ? '#B86A512F' : '#AD252425')
@@ -809,13 +1035,16 @@ struct Index {
   private clearMaterials(): void {
     this.version++;
     this.film = ''; this.paper = ''; this.lastColorPaper = DEFAULT_PAPER;
-    this.values = [0, 1, 1, 1]; this.frameEnabled = false;
-    const preview = this.preview, framed = this.framed, cropped = this.croppedPreview;
-    this.preview = undefined; this.framed = undefined; this.croppedPreview = undefined;
-    preview?.release(); framed?.release(); cropped?.release();
+    this.values = [0, 1, 1, 1];
+    const preview = this.preview, cropped = this.croppedPreview;
+    this.preview = undefined; this.croppedPreview = undefined;
+    preview?.release(); cropped?.release();
+    const base = this.croppedOriginal ?? this.original;
+    if (base && this.original && this.borderId) this.replaceFrame(base, this.original, '');
     this.goodFilm = ''; this.goodPaper = ''; this.goodValues = this.values.slice();
+    this.borderSourceRevision++;
     this.retryFilm = ''; this.retryPaper = ''; this.retryValues = [];
-    this.matched = true; this.dirty = this.hasGeometry(); this.message = ''; this.compare = false;
+    this.matched = true; this.dirty = this.hasGeometry() || !!this.borderId; this.message = ''; this.compare = false;
   }
 
   private selected(stock: Stock): boolean { return stock.id === (stock.paper ? this.paper : this.film); }
@@ -905,20 +1134,26 @@ struct Index {
 
   @Builder
   materials(full: boolean) {
+    if (full && this.showMaterialOrderHint) {
+      Text('长按拖动可调整顺序').fontSize(13).fontColor('#EFCD97').width('100%')
+        .padding({left: 8, right: 8, bottom: 8})
+    }
     List({space: 8}) {
-      ForEach(this.stocks(full), (stock: Stock, i: number) => {
-        ListItem() {
-          if (full) {
-            Column({space: 6}) {
-              if (stock.id && this.tab === 0 && (i === 0 || this.films[i-1].group !== stock.group)) {
-                Text(stock.group).fontSize(13).fontColor('#B9B3AC').padding({top: 8})
-              }
-              this.materialRow(stock, false)
-            }.width('100%').alignItems(HorizontalAlign.Start)
-          } else { this.card(stock) }
+      ListItem() {
+        if (full) {
+          this.materialRow(this.tab === 1 ? this.papers[0] : this.films[0], false)
+        } else {
+          this.card(this.tab === 1 ? this.papers[0] : this.films[0])
         }
-      }, (s: Stock) => s.id)
-    }.listDirection(full ? Axis.Vertical : Axis.Horizontal)
+      }
+      ForEach(this.orderedStocks(), (stock: Stock) => {
+        ListItem() {
+          if (full) { this.materialRow(stock, false) } else { this.card(stock) }
+        }.id((full ? 'material-row-' : 'material-card-') + stock.id)
+      }, (stock: Stock) => stock.id)
+        .onMove((from: number, to: number) => this.moveStock(from, to))
+    }.id(full ? 'material-library' : 'material-strip')
+      .listDirection(full ? Axis.Vertical : Axis.Horizontal)
       .layoutWeight(full ? 1 : 0)
       .height(full ? '100%' : 102).width('100%').scrollBar(BarState.Off)
       .onAreaChange((_a, area) => { this.cardWidth = Math.max(84, (Number(area.width) - 16) / 3); })
@@ -975,11 +1210,6 @@ struct Index {
 
   @Builder
   adjustments() {
-    Row() {
-      Text('胶卷相框').fontSize(14).fontColor('#E6E0D9').layoutWeight(1)
-      Toggle({ type: ToggleType.Switch, isOn: this.frameEnabled }).selectedColor('#AA763B')
-        .accessibilityText('胶卷相框').onChange((enabled: boolean) => this.toggleFrame(enabled))
-    }.height(44).width('100%').enabled(this.hasMaterials() && !this.rendering)
     ForEach(this.filmProfile(this.film).reversal ? this.labels.slice(0, 3) : this.labels, (label: string, index: number) => {
       Row({space: 8}) {
         Text(label).width(28).fontSize(14).fontWeight(FontWeight.Medium).fontColor('#E6E0D9')
@@ -997,10 +1227,72 @@ struct Index {
   }
 
   @Builder
+  borderCard(border: FrameBorder, grid: boolean) {
+    FrameBorderCard({
+      preset: border, getSource: () => this.framingFor(border) ? this.preview ?? this.original : this.borderBase(),
+      getFraming: () => this.framingFor(border), getFilm: () => this.borderFilm(this.goodFilm),
+      sourceRevision: this.borderSourceRevision, selected: this.borderId === border.id,
+      cardWidth: grid ? Math.max(60, (this.borderListWidth - 16) / 3) : this.borderStripWidth(),
+      onSelect: () => this.chooseBorder(border)
+    })
+  }
+
+  private borderStripWidth(): number { return Math.max(62, (this.borderListWidth - 25) / 3.2); }
+
+  private moveBorder(from: number, to: number): void {
+    const next = moveVisibleMaterial(this.borderOrder, this.borderOrder, from, to);
+    if (next === this.borderOrder) return;
+    this.borderOrder = next;
+    this.saveMaterialPreference('borderOrder', next);
+  }
+
+  @Builder
+  borderList(grid: boolean) {
+    List({space: 8}) {
+      ListItem() { this.borderCard(NO_FRAME, grid) }
+      ForEach(this.borderOrder.map((id: string) => this.borders.find((border: FrameBorder) => border.id === id)!),
+        (border: FrameBorder) => {
+        ListItem() { this.borderCard(border, grid) }
+      }, (border: FrameBorder) => border.id)
+        .onMove((from: number, to: number) => this.moveBorder(from, to))
+    }.id(grid ? 'border-grid' : 'border-strip')
+      .listDirection(grid ? Axis.Vertical : Axis.Horizontal)
+      .lanes(grid ? 3 : 1, grid ? 8 : 0)
+      .width('100%').layoutWeight(grid ? 1 : 0)
+      .height(grid ? '100%' : Math.round(this.borderStripWidth() * 0.74) + 59)
+      .scrollBar(grid ? BarState.Auto : BarState.Off)
+  }
+
+  @Builder
+  borderPicker(allowToggle: boolean) {
+    Column({space: 4}) {
+      Row({space: 8}) {
+        Text('选择边框').fontSize(13).fontWeight(FontWeight.Medium).fontColor('#F2ECE5').layoutWeight(1)
+        if (allowToggle) {
+          Button(this.panel === 2 ? '收起列表' : '查看全部', {type: ButtonType.Normal}).id('border-browse')
+            .fontColor('#EFCD97').fontSize(12).height(30).padding({left: 10, right: 2})
+            .backgroundColor(Color.Transparent).onClick(() => this.snapPanel(this.panel === 2 ? 1 : 2))
+        }
+      }.width('100%')
+      if (!allowToggle || this.panel === 2) {
+        if (this.showBorderOrderHint) {
+          Text('长按拖动可调整顺序').fontSize(13).fontColor('#EFCD97').width('100%')
+            .padding({left: 8, right: 8, bottom: 4})
+        }
+        this.borderList(true)
+      } else {
+        this.borderList(false)
+      }
+    }.width('100%').layoutWeight(1).alignItems(HorizontalAlign.Start)
+      .onAreaChange((_old, area) => { this.borderListWidth = Number(area.width); })
+  }
+
+  @Builder
   materialTabs() {
     Row() {
-      ForEach(['胶片','相纸','调整'], (label: string, i: number) => {
-        Button(label, {type: ButtonType.Normal}).borderRadius(CORNER_RADIUS).layoutWeight(1).height(38).margin({left: 3, right: 3})
+      ForEach(['胶片', '相纸', '边框', '调整'], (label: string, i: number) => {
+        Button(label, {type: ButtonType.Normal}).id('editor-tab-' + i)
+          .borderRadius(CORNER_RADIUS).layoutWeight(1).height(38).margin({left: 3, right: 3})
           .fontSize(15).fontWeight(this.tab === i ? FontWeight.Bold : FontWeight.Regular)
           .fontColor(this.tab === i ? '#FFDA9E' : '#ECE7E0')
           .backgroundColor(this.tab === i ? '#54432E' : '#302E2F').systemMaterial(this.tabMaterial)
@@ -1015,6 +1307,7 @@ struct Index {
   bottomPanel() {
     Column() {
       Button({type: ButtonType.Normal}) { Rect().width(36).height(4).radius(2).fill('#AEAAA3') }
+        .id('material-dock-handle')
         .accessibilityText(this.panel === 0 ? '展开材料' : this.panel === 1 ? '展开材料库' : '收起材料库')
         .width('100%').height(HANDLE_HEIGHT).borderRadius(CORNER_RADIUS).backgroundColor('#201F20')
         .gesture(GestureGroup(GestureMode.Exclusive,
@@ -1036,11 +1329,13 @@ struct Index {
             }
             this.snapPanel(Math.max(0, Math.min(2, target)));
           }).onActionCancel(() => this.snapPanel(this.panel)),
-          TapGesture().onAction(() => this.snapPanel((this.panel + 1) % 3))
+          TapGesture().onAction(() => this.snapPanel(this.tab === BORDER_TAB && this.panel === 2 ? 1 : (this.panel + 1) % 3))
         ))
       if (this.panelPosition > 0.02 || this.panel !== 0) {
         this.materialTabs()
-        if (this.tab === 2) {
+        if (this.tab === BORDER_TAB) {
+          this.borderPicker(true)
+        } else if (this.tab === ADJUST_TAB) {
           Scroll() { Column() { this.adjustments() }.width('100%') }
             .layoutWeight(1).width('100%').align(Alignment.Top)
         } else {
@@ -1066,7 +1361,9 @@ struct Index {
   sidePanel() {
     Column() {
       this.materialTabs()
-      if (this.tab === 2) {
+      if (this.tab === BORDER_TAB) {
+        this.borderPicker(false)
+      } else if (this.tab === ADJUST_TAB) {
         Scroll() { Column() { this.adjustments() }.width('100%') }
           .layoutWeight(1).width('100%').align(Alignment.Top)
       } else {
@@ -1096,6 +1393,18 @@ struct Index {
     Column() {
       if (this.choosingPhoto) {
         FormatPhotoPicker({onCancel: () => this.cancelPhoto(), onConfirm: (uri: string) => this.confirmPhoto(uri)})
+      } else if (this.framingOpen && this.original) {
+        CropEditor({
+          photo: this.preview ?? this.original,
+          sourceWidth: this.rawRotation ? this.heightPx : this.widthPx,
+          sourceHeight: this.rawRotation ? this.widthPx : this.heightPx,
+          geometry: this.framingFor(this.currentBorder()) ?? this.defaultFraming(),
+          borderFraming: true,
+          resetGeometry: () => this.defaultFraming(),
+          onOpenCrop: () => { this.framingOpen = false; this.cropOpen = true; },
+          onCancel: () => { this.framingOpen = false; },
+          onApply: (geometry: PhotoGeometry) => this.applyBorderFraming(geometry)
+        })
       } else if (this.cropOpen && this.original) {
         CropEditor({
           photo: this.preview ?? this.original,
@@ -1131,6 +1440,10 @@ struct Index {
             })
         } else { Blank().width(78) }
       }.height(54).width('100%').padding({left: 14, right: 14})
+      if (this.rawSaveHint()) {
+        Text(this.rawSaveHint()).id('raw-save-hint').fontSize(13).fontColor('#D9C4A8')
+          .width('100%').textAlign(TextAlign.End).padding({left: 14, right: 14, bottom: 8})
+      }
       Flex({direction: this.wide() ? FlexDirection.Row : FlexDirection.Column}) {
         Column() {
           if (this.importing) {
@@ -1162,15 +1475,18 @@ struct Index {
         }
       }.width('100%').layoutWeight(1)
       }
-    }.width('100%').height('100%').onAreaChange((_a, b) => { this.windowHeight = Number(b.height);
-        this.windowWidth = Number(b.width) - this.getUIContext().px2vp(this.leftInset + this.rightInset); }).backgroundColor('#171819')
+    }.width('100%').height('100%').onAreaChange((_a, b) => {
+        this.windowHeight = Number(b.height);
+        this.windowWidth = Number(b.width) - this.getUIContext().px2vp(this.leftInset + this.rightInset);
+        this.updateMaterialOrderHint();
+      }).backgroundColor('#171819')
       .padding({top: this.topInset + 'px', left: this.leftInset + 'px', right: this.rightInset + 'px',
-        bottom: !this.choosingPhoto && !this.cropOpen && this.original && !this.wide() ? 0 : this.bottomInset + 'px'})
+        bottom: !this.choosingPhoto && !this.cropOpen && !this.framingOpen && this.original && !this.wide() ? 0 : this.bottomInset + 'px'})
       AppUpdates({ready: !this.busy && !this.rendering && !this.original && !this.choosingPhoto && !!this.assets})
       if (this.saveHelpOpen) {
         Column() {
           Text(this.hasMaterials() ? '保存时，SpektraLab 会按照片的原始分辨率重新冲印，将胶片色彩、颗粒、光晕等效果计算到完整画面中，再生成照片并写入相册。原图的像素越多，处理时间通常越长。' :
-            'SpektraLab 正在从原始照片生成裁切与旋转后的图片，并写入相册。')
+            'SpektraLab 正在从原始照片按当前编辑效果生成图片，并写入相册。')
             .fontSize(14).lineHeight(22).fontColor('#F2ECE5').padding(20)
             .width('85%').constraintSize({maxWidth: 340})
             .backgroundColor('#353436').borderRadius(CORNER_RADIUS)

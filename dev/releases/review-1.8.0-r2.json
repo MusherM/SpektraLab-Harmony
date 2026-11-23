@@ -1,0 +1,71 @@
+{
+  "version": "1.8.0",
+  "version_code": 13,
+  "previous": "1.7.0",
+  "repository": "MusherM/SpektraLab-Harmony",
+  "source": "ae518f64c86a1d5d19fc5db6318211f71b60e7d0",
+  "date": "2026-11-23 16:00",
+  "app": {
+    "profile_type": "release",
+    "distribution": "app_gallery",
+    "signature": "verified"
+  },
+  "changes": [
+    "- **边框与实时预览**：在「相纸」和「调整」之间新增「边框」，可在当前照片上实时预览 41 款边框，包括此前提供的全部款式。",
+    "- **边框取景调整**：遇到会裁去画面的边框时，可按开口比例拖动或缩放取景框。切回同一款边框时恢复取景，保存成片沿用预览构图。",
+    "- **长按排序**：边框、胶片和相纸支持长按拖动。收起和展开使用同一顺序，重启后保留；「无边框」固定在首位。"
+  ],
+  "checks": [
+    "1.8.0（13）release 构建、签名调试 HAP 构建及本机自动回归通过。",
+    "直板机和 HOP 覆盖安装本轮调试包，同角度应用普通 1:1 裁切后，预览和保存均使用新裁切。",
+    "直板机和 HOP 均可选择原有 Kodak 400UC 并调整取景。调试 HAP、发行 HAP 和签名 APP 内的 37 个边框资源逐个与原资源校验一致。",
+    "签名 APP 对应的五组 RAW 方向验收全部通过，包括实拍华为 Mate 70 Air DNG 的 90° 预览补偿。",
+    "release 未签名 HAP 与 APP 内的 ArkTS 字节码和原生库一致。发行 APP 验签通过，profile 为 release / app_gallery。",
+    "AppGallery 鉴权、应用匹配、上传权限及本轮材料清单校验通过。"
+  ],
+  "raw_orientation": [
+    {
+      "sample": "Canon CR2",
+      "result": "通过",
+      "rotation": 0,
+      "score": 0.98712
+    },
+    {
+      "sample": "Nikon NEF",
+      "result": "通过",
+      "rotation": 0,
+      "score": 0.994309
+    },
+    {
+      "sample": "Sony ARW",
+      "result": "通过",
+      "rotation": 0,
+      "score": 0.991985
+    },
+    {
+      "sample": "Fujifilm RAF",
+      "result": "通过",
+      "rotation": 0,
+      "score": 0.912038
+    },
+    {
+      "sample": "华为 Mate 70 Air DNG",
+      "result": "通过",
+      "rotation": 90,
+      "score": 0.965726
+    }
+  ],
+  "digests": {
+    "release 未签名 HAP": "38436f2c512bb52e14df5d61af78c53182be94174dc0b40e6b1767bdc1e2a66f",
+    "发行签名 APP": "a1339410cdeb6b502aee8411ef4342feec5bab594232a185262e2b198e0080b7",
+    "中文更新日志": "b0f113bdcb35f8577d498ef6a2ce650821bf653822fbb7a9d0aa92d46581b715",
+    "完整材料清单": "e99ea8269b810912803b53e2206b7c23eb44ddd5f3ef384db02ff2969089021e",
+    "RAW 方向验收记录": "53f026e441fa72bbebbfbfb1f7d5d05b4a1c741049647cdaaf594544983b5e70",
+    "边框资源清单": "7683d4c3eea2493dd0b5f3f18a65754019fe6b7e0da9f6e48a8a5348d884a405"
+  },
+  "screenshots": {
+    "evidence/1.8.0-r2/bar-crop-precedence.jpg": "749042000363eb1cf17a53d21995c9488c16d46fbd5e6b46be21d043586bd54f",
+    "evidence/1.8.0-r2/hop-crop-precedence.jpg": "df08ad0fd4b7b8ba8b429add890b43019c1f12b8a15b32082d26b07383e72cdc"
+  },
+  "store_notes": "边框与实时预览。在「相纸」和「调整」之间新增「边框」，可在当前照片上实时预览 41 款边框，包括此前提供的全部款式。\n边框取景调整。遇到会裁去画面的边框时，可按开口比例拖动或缩放取景框。切回同一款边框时恢复取景，保存成片沿用预览构图。\n长按排序。边框、胶片和相纸支持长按拖动。收起和展开使用同一顺序，重启后保留；「无边框」固定在首位。"
+}

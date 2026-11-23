@@ -1,0 +1,48 @@
+[
+  {
+    "id": "canon-cr2",
+    "camera": "Canon EOS 5D Mark III",
+    "direction": "横幅",
+    "file": "01_Canon_EOS_5D_Mark_III.CR2",
+    "source_sha256": "ec069b178b9383d80c72f8cdc1b79bd54ca451e7c20793b109d8ad73bef6bdf6",
+    "input_sha256": "ec069b178b9383d80c72f8cdc1b79bd54ca451e7c20793b109d8ad73bef6bdf6",
+    "source_url": "https://raw.pixls.us/getfile.php/771/nice/Canon - EOS 5D Mark III.CR2",
+    "license": "CC0-1.0",
+    "reference_jpeg_offset": 93772
+  },
+  {
+    "id": "nikon-nef",
+    "camera": "Nikon D750",
+    "direction": "旋转 180°",
+    "file": "02_Nikon_D750.NEF",
+    "source_sha256": "e4a3f85e014275fc0a47600a373af95ec850872a5f6cf87649bcaa42b77ef2e4",
+    "exif_orientation": 3,
+    "input_sha256": "232d50c0c159549d6962e095de47b7a73f172d04dad889e4a3fbe6d6caf70ef9",
+    "source_url": "https://raw.pixls.us/getfile.php/895/nice/Nikon - D750 - 12bit 12bit compressed (Lossy (type 2)) (3:2).NEF",
+    "license": "CC0-1.0",
+    "reference_jpeg_offset": 971776
+  },
+  {
+    "id": "sony-arw",
+    "camera": "Sony ILCE-6000",
+    "direction": "顺时针旋转 90°",
+    "file": "03_Sony_ILCE_6000.ARW",
+    "source_sha256": "ce8b4957281a817d52a07a691e2468567b6c78223bd0b514ffc1c65b002b8d89",
+    "exif_orientation": 6,
+    "input_sha256": "81ce7deefae1d3c216eea64cc5e99103b350fa3457b4860ed5793536929b3869",
+    "source_url": "https://raw.pixls.us/getfile.php/1971/nice/Sony - ILCE-6000 - 12bit 12bit compressed (3:2).ARW",
+    "license": "CC0-1.0",
+    "reference_jpeg_offset": 147106
+  },
+  {
+    "id": "fuji-raf",
+    "camera": "Fujifilm X-T10",
+    "direction": "横幅",
+    "file": "04_Fujifilm_X_T10.RAF",
+    "source_sha256": "4c09401975cc6f95b1284693aac39fef85498f70b55e35bf458a133c6e61885d",
+    "input_sha256": "4c09401975cc6f95b1284693aac39fef85498f70b55e35bf458a133c6e61885d",
+    "source_url": "https://raw.pixls.us/getfile.php/1192/nice/Fujifilm - X-T10 - 14bit 14bit uncompressed (3:2).RAF",
+    "license": "CC0-1.0",
+    "reference_jpeg_offset": 148
+  }
+]

@@ -2,6 +2,8 @@ import { image } from '@kit.ImageKit';
 import { EDITOR_CORNER_RADIUS } from '../common/EditorTheme';
 import { fullPhoto, lockedRatio, PhotoGeometry, selectRatio, turnPhoto } from '../common/PhotoGeometry';
 
+import { resizeBorderFraming } from '../common/BorderFraming';
+
 const ACCENT: string = '#EFBD70';
 const POPUP_SURFACE: string = '#242323';
 
@@ -11,11 +13,15 @@ export struct CropEditor {
   sourceWidth: number = 1;
   sourceHeight: number = 1;
   @State geometry: PhotoGeometry = fullPhoto();
+  borderFraming: boolean = false;
+  resetGeometry: () => PhotoGeometry = fullPhoto;
+  onOpenCrop: () => void = () => {};
   onCancel: () => void = () => {};
   onApply: (geometry: PhotoGeometry) => void = () => {};
   @State private areaWidth: number = 0;
   @State private areaHeight: number = 0;
   @State private ratioOpen: boolean = false;
+  private pinchStart: PhotoGeometry = fullPhoto();
   private dragStart: PhotoGeometry = fullPhoto();
   private readonly ratioOptions: string[][] = [
     ['free', 'original', '1:1'],
@@ -206,8 +212,16 @@ export struct CropEditor {
         .height((this.geometry.bottom - this.geometry.top) * this.imageHeight())
         .position({ x: this.geometry.left * this.imageWidth(), y: this.geometry.top * this.imageHeight() })
         .border({ width: 1, color: '#E6FFFFFF' })
-        .gesture(PanGesture({ distance: 0 }).onActionStart(() => { this.dragStart = this.geometry; })
-          .onActionUpdate((event: GestureEvent) => this.drag(event, 0, 0)))
+        .gesture(GestureGroup(GestureMode.Exclusive,
+          PinchGesture().onActionStart(() => { this.pinchStart = this.geometry; })
+            .onActionUpdate((event: GestureEvent) => {
+              if (this.borderFraming) {
+                this.geometry = resizeBorderFraming(this.pinchStart, event.scale,
+                  48 / this.imageWidth(), 48 / this.imageHeight());
+              }
+            }),
+          PanGesture({ distance: 0 }).onActionStart(() => { this.dragStart = this.geometry; })
+            .onActionUpdate((event: GestureEvent) => this.drag(event, 0, 0))))
       this.handle(-1, -1)
       this.handle(1, -1)
       this.handle(-1, 1)
@@ -221,11 +235,11 @@ export struct CropEditor {
         Button('取消', { type: ButtonType.Normal }).height(44).width(52).padding(0)
           .fontSize(15).fontColor('#F2ECE5').backgroundColor(Color.Transparent)
           .onClick(this.onCancel)
-        Text('裁切').fontSize(20).fontWeight(FontWeight.Bold).fontColor('#F2ECE5')
+        Text(this.borderFraming ? '边框取景' : '裁切').fontSize(20).fontWeight(FontWeight.Bold).fontColor('#F2ECE5')
           .textAlign(TextAlign.Center).layoutWeight(1)
         Button('重置', { type: ButtonType.Normal }).height(44).width(52).padding(0)
           .fontSize(15).fontColor('#F2ECE5').backgroundColor(Color.Transparent)
-          .onClick(() => { this.geometry = fullPhoto(); })
+          .onClick(() => { this.geometry = this.resetGeometry(); })
       }.width('100%').height(86).padding({ left: 13, right: 13, top: 14 })
       Stack() {
         if (this.fit() > 0) {
@@ -234,7 +248,13 @@ export struct CropEditor {
       }.width('100%').layoutWeight(1)
         .onAreaChange((_old, area) => { this.areaWidth = Number(area.width); this.areaHeight = Number(area.height); })
       Column({ space: 22 }) {
-        this.toolDock()
+        if (this.borderFraming) {
+          Button('裁切与旋转', { type: ButtonType.Normal }).height(44)
+            .fontSize(14).fontColor('#EFCD97').backgroundColor(Color.Transparent)
+            .onClick(this.onOpenCrop)
+        } else {
+          this.toolDock()
+        }
         Button('应用', { type: ButtonType.Normal }).width('100%').constraintSize({ maxWidth: 520 })
           .height(46).borderRadius(EDITOR_CORNER_RADIUS).fontSize(17).fontWeight(FontWeight.Medium)
           .fontColor('#32271D').backgroundColor(ACCENT)
