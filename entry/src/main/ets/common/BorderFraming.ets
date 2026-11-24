@@ -9,6 +9,24 @@ export function centeredBorderFraming(bounds: PhotoGeometry, aperture: number, f
   return {angle: bounds.angle, ratio: aperture + ':1', left, top, right: left + width, bottom: top + height};
 }
 
+export interface BorderFraming extends PhotoGeometry {
+  baseAspect: number;
+}
+
+export function framingForWindow(framing: BorderFraming, aperture: number, referenceAperture: number,
+  fullAspect: number): PhotoGeometry {
+  if (aperture === referenceAperture) return framing;
+  const aspect = aperture / fullAspect;
+  const referenceHeight = Math.min(1, framing.baseAspect / referenceAperture);
+  const windowHeight = Math.min(1, framing.baseAspect / aperture);
+  const height = Math.min(1, 1 / aspect,
+    (framing.bottom - framing.top) * windowHeight / referenceHeight);
+  const width = height * aspect;
+  const left = Math.max(0, Math.min(1 - width, (framing.left + framing.right - width) / 2));
+  const top = Math.max(0, Math.min(1 - height, (framing.top + framing.bottom - height) / 2));
+  return {angle: framing.angle, ratio: aperture + ':1', left, top, right: left + width, bottom: top + height};
+}
+
 export function resizeBorderFraming(start: PhotoGeometry, scale: number, minWidth: number, minHeight: number): PhotoGeometry {
   const width = start.right - start.left;
   const height = start.bottom - start.top;

@@ -1,6 +1,5 @@
 import { curves } from '@kit.ArkUI';
-import { vibrator } from '@kit.SensorServiceKit';
-import { BusinessError } from '@kit.BasicServicesKit';
+import { SelectionHaptics } from '../common/SelectionHaptics';
 import { AppLog } from '../common/AppLog';
 import { homeDisplayCount, homePageCount, homeCardScale } from '../common/HomeGalleryRules';
 
@@ -68,33 +67,22 @@ export struct HomeGallery {
   private indicatorTarget: number = 0;
   private indicatorController: IndicatorComponentController = new IndicatorComponentController();
   private active: boolean = false;
-  private softHaptic: boolean = false;
+  private readonly haptics: SelectionHaptics = new SelectionHaptics();
 
   aboutToAppear(): void {
     this.active = true;
     this.feedbackIndex = this.currentIndex;
     this.initialPageIndex = this.currentIndex;
     this.indicatorTarget = this.currentIndex;
-    vibrator.isSupportEffect(vibrator.HapticFeedback.EFFECT_SOFT).then((supported: boolean) => {
-      this.softHaptic = supported;
-    }).catch((error: BusinessError) => AppLog.failure('home haptic capability', error));
+    this.haptics.prepare('home');
   }
 
   aboutToDisappear(): void { this.active = false; }
 
-  private async selectionFeedback(index: number, source: string): Promise<void> {
+  private selectionFeedback(index: number, source: string): void {
     if (!this.active || index === this.feedbackIndex) return;
     this.feedbackIndex = index;
-    AppLog.record('home selection index=' + index + ' source=' + source);
-    try {
-      if (this.softHaptic) {
-        await vibrator.startVibration({type: 'preset', effectId: vibrator.HapticFeedback.EFFECT_SOFT,
-          count: 1}, {usage: 'touch'});
-      } else {
-        await vibrator.startVibration({type: 'time', duration: 12}, {usage: 'touch'});
-      }
-      AppLog.record('home selection index=' + index + ' haptic accepted');
-    } catch (error) { AppLog.failure('home haptic', error as BusinessError); }
+    this.haptics.pulse('home', index, source);
   }
 
   private scrubIndicator(event: GestureEvent): void {

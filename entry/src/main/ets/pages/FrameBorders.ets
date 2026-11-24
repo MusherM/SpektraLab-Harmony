@@ -2,8 +2,7 @@ import { image } from '@kit.ImageKit';
 import { drawing } from '@kit.ArkGraphics2D';
 import { resourceManager } from '@kit.LocalizationKit';
 import { framePrint } from './FilmFrame';
-import { PhotoGeometry } from '../common/PhotoGeometry';
-import { framingInSource } from '../common/BorderFraming';
+import { BorderFraming, framingForWindow, framingInSource } from '../common/BorderFraming';
 
 export interface FrameBorder {
   id: string;
@@ -159,9 +158,9 @@ function studioOverlay(border: FrameBorder, longest: number): image.PixelMap {
   }
 }
 
-export function borderAperture(border: FrameBorder): number {
-  if (border.windows.length !== 1 || border.id === '01-04' || border.id === '01-06') return 0;
-  return border.windows[0][2] * border.width / (border.windows[0][3] * border.height);
+export function borderAperture(border: FrameBorder, index: number = 0): number {
+  const window = border.windows[index];
+  return window ? window[2] * border.width / (window[3] * border.height) : 0;
 }
 
 export async function loadBorderOverlay(resources: resourceManager.ResourceManager, border: FrameBorder,
@@ -181,7 +180,7 @@ export async function loadBorderOverlay(resources: resourceManager.ResourceManag
 }
 
 export function composeBorder(photo: image.PixelMap, border: FrameBorder, overlay: image.PixelMap | undefined,
-  film: string, longest: number = 0, framing?: PhotoGeometry): image.PixelMap {
+  film: string, longest: number = 0, framing?: BorderFraming): image.PixelMap {
   const size = photo.getImageInfoSync().size;
   const sampling = new drawing.SamplingOptions(drawing.FilterMode.FILTER_MODE_LINEAR);
   if (border.id === FILM_RAIL) {
@@ -211,14 +210,18 @@ export function composeBorder(photo: image.PixelMap, border: FrameBorder, overla
     brush.setColor(255, 8, 8, 9);
     canvas.drawBackground(brush);
     const windows = overlay ? border.windows : [[0, 0, 1, 1]];
-    for (const window of windows) {
+    const referenceAperture = borderAperture(border);
+    for (let index = 0; index < windows.length; index++) {
+      const window = windows[index];
       const left = window[0] * width;
       const top = window[1] * height;
       const w = window[2] * width;
       const h = window[3] * height;
       if (framing) {
-        const source = framingInSource(framing);
         const sideways = framing.angle % 180 !== 0;
+        const fullAspect = sideways ? size.height / size.width : size.width / size.height;
+        const selection = framingForWindow(framing, borderAperture(border, index), referenceAperture, fullAspect);
+        const source = framingInSource(selection);
         const dw = sideways ? h : w;
         const dh = sideways ? w : h;
         canvas.save();

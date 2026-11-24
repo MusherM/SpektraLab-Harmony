@@ -2,6 +2,7 @@
 #include <spektrafilm/spk_engine.h>
 #include <cstdint>
 #include <array>
+#include <atomic>
 #include <fcntl.h>
 #include <unistd.h>
 #include <cerrno>
@@ -15,6 +16,7 @@
 #include <string>
 #include <vector>
 #include <mutex>
+#include <unordered_map>
 #include <sys/stat.h>
 #include <chrono>
 
@@ -22,6 +24,46 @@
 namespace {
 // N-API workers share this library; serialize engine and cache access.
 std::mutex resourcesMutex;
+struct Operation {
+    std::atomic<bool> cancelled{false};
+    std::mutex mutex;
+    spk_session* session = nullptr;
+};
+struct Cancelled : std::runtime_error {
+    Cancelled() : std::runtime_error("Operation cancelled") {}
+};
+std::mutex operationsMutex;
+std::unordered_map<uint32_t, std::shared_ptr<Operation>> operations;
+uint32_t nextOperation = 0;
+
+std::shared_ptr<Operation> operationFor(napi_env env, napi_value value) {
+    uint32_t id = 0;
+    if (napi_get_value_uint32(env, value, &id) != napi_ok || id == 0) return {};
+    std::lock_guard<std::mutex> lock(operationsMutex);
+    const auto found = operations.find(id);
+    return found == operations.end() ? nullptr : found->second;
+}
+
+void checkCancelled(const std::shared_ptr<Operation>& operation) {
+    if (operation && operation->cancelled.load()) throw Cancelled();
+}
+
+class RenderRegistration {
+public:
+    RenderRegistration(const std::shared_ptr<Operation>& operation, spk_session* session) : operation_(operation) {
+        if (!operation_) return;
+        std::lock_guard<std::mutex> lock(operation_->mutex);
+        checkCancelled(operation_);
+        operation_->session = session;
+    }
+    ~RenderRegistration() {
+        if (!operation_) return;
+        std::lock_guard<std::mutex> lock(operation_->mutex);
+        operation_->session = nullptr;
+    }
+private:
+    std::shared_ptr<Operation> operation_;
+};
 using Engine = std::unique_ptr<spk_engine, decltype(&spk_engine_destroy)>;
 Engine cachedEngine(nullptr, spk_engine_destroy);
 std::string enginePath;
@@ -61,10 +103,19 @@ struct Output {
     ~Output() { spk_result_free(&value); }
 };
 
-napi_value finishRender(napi_env env, spk_engine* engine, spk_session* session, uint32_t w, uint32_t h) {
+napi_value finishRender(napi_env env, spk_engine* engine, spk_session* session, uint32_t w, uint32_t h,
+    const std::shared_ptr<Operation>& operation) {
+    checkCancelled(operation);
     if (!session) throw std::runtime_error(spk_last_error(engine));
     Output result;
-    if (spk_render(session, "full", &result.value) != SPK_OK)
+    spk_status status;
+    {
+        RenderRegistration registration(operation, session);
+        status = spk_render(session, "full", &result.value);
+    }
+    checkCancelled(operation);
+    if (status == SPK_ERR_CANCELLED) throw Cancelled();
+    if (status != SPK_OK)
         throw std::runtime_error(spk_last_error(engine));
     const auto& frame = result.value;
     if (!frame.rgba16 || frame.width != w || frame.height != h || frame.row_stride_px < w)
@@ -74,6 +125,7 @@ napi_value finishRender(napi_env env, spk_engine* engine, spk_session* session, 
     if (napi_create_arraybuffer(env, size_t(w) * h * 4, &destination, &buffer) != napi_ok)
         throw std::runtime_error("Cannot allocate output pixels");
     for (size_t y = 0; y < h; ++y) {
+        if (y % 32 == 0) checkCancelled(operation);
         auto row = frame.rgba16 + y * frame.row_stride_px * 4;
         auto out = static_cast<uint8_t*>(destination) + y * w * 4;
         for (size_t k = 0; k < size_t(w) * 4; ++k) out[k] = (row[k] + 128u) / 257u;
@@ -85,10 +137,12 @@ template<bool Linear>
 napi_value render(napi_env env, napi_callback_info info) {
     std::lock_guard<std::mutex> lock(resourcesMutex);
     try {
-        napi_value args[5]{};
-        size_t count = 5;
-        if (napi_get_cb_info(env, info, &count, args, nullptr, nullptr) != napi_ok || count != 5)
+        napi_value args[6]{};
+        size_t count = 6;
+        if (napi_get_cb_info(env, info, &count, args, nullptr, nullptr) != napi_ok || count < 5)
             throw std::runtime_error("Expected resources, pixels, width, height and parameter JSON");
+        const auto operation = count == 6 ? operationFor(env, args[5]) : nullptr;
+        checkCancelled(operation);
         const auto path = readText(env, args[0]);
         const auto params = readText(env, args[4]);
         void* raw = nullptr;
@@ -107,12 +161,17 @@ napi_value render(napi_env env, napi_callback_info info) {
         } else {
             auto pixels = static_cast<const uint8_t*>(raw);
             std::vector<float> rgb(bytes / 4 * 3);
-            for (size_t i = 0; i < bytes / 4; ++i)
+            for (size_t i = 0; i < bytes / 4; ++i) {
+                if (i % 65536 == 0) checkCancelled(operation);
                 for (size_t c = 0; c < 3; ++c) rgb[i * 3 + c] = pixels[i * 4 + c] / 255.0f;
+            }
             const spk_image input{rgb.data(), w, h, 3};
             session.reset(spk_open(engine, &input, params.c_str(), nullptr));
         }
-        return finishRender(env, engine, session.get(), w, h);
+        return finishRender(env, engine, session.get(), w, h, operation);
+    } catch (const Cancelled& error) {
+        napi_throw_error(env, nullptr, error.what());
+        return nullptr;
     } catch (const std::exception& error) {
         cachedEngine.reset();
         napi_throw_error(env, nullptr, error.what());
@@ -122,7 +181,7 @@ napi_value render(napi_env env, napi_callback_info info) {
 
 class RawSourceFile {
 public:
-    RawSourceFile(int source, const std::string& cacheDir) {
+    RawSourceFile(int source, const std::string& cacheDir, const std::shared_ptr<Operation>& operation) {
         std::string pattern = cacheDir + "/spektralab-raw-XXXXXX";
         std::vector<char> name(pattern.begin(), pattern.end());
         name.push_back('\0');
@@ -133,6 +192,7 @@ public:
             std::array<char, 65536> buffer;
             off_t offset = 0;
             for (;;) {
+                checkCancelled(operation);
                 ssize_t count = pread(source, buffer.data(), buffer.size(), offset);
                 if (count < 0 && errno == EINTR) continue;
                 if (count < 0) throw std::system_error(errno, std::generic_category(), "RAW read");
@@ -163,7 +223,9 @@ private:
     std::string path_;
 };
 
-std::shared_ptr<spk::io::DecodedRaw> readRaw(int fd, const std::string& cacheDir, std::string* warning = nullptr) {
+std::shared_ptr<spk::io::DecodedRaw> readRaw(int fd, const std::string& cacheDir,
+    const std::shared_ptr<Operation>& operation, std::string* warning = nullptr) {
+    checkCancelled(operation);
     struct stat identity{};
     if (fstat(fd, &identity) != 0) throw std::system_error(errno, std::generic_category(), "RAW identity");
     if (cachedRaw && sameSource(identity, rawIdentity)) {
@@ -173,9 +235,10 @@ std::shared_ptr<spk::io::DecodedRaw> readRaw(int fd, const std::string& cacheDir
     cachedRaw.reset();
     rawWarning.clear();
     // Gallery grants descriptor access; reopening its procfs link can be denied.
-    RawSourceFile source(fd, cacheDir);
+    RawSourceFile source(fd, cacheDir, operation);
     std::string decodedWarning;
     auto raw = std::make_shared<spk::io::DecodedRaw>(harmony_raw::decode(source.path(), &decodedWarning));
+    checkCancelled(operation);
     struct stat after{};
     if (fstat(fd, &after) != 0 || !sameSource(identity, after))
         throw std::runtime_error("RAW source changed while decoding");
@@ -191,26 +254,28 @@ std::shared_ptr<spk::io::DecodedRaw> readRaw(int fd, const std::string& cacheDir
 napi_value renderRaw(napi_env env, napi_callback_info info) {
     std::lock_guard<std::mutex> lock(resourcesMutex);
     try {
-        napi_value args[4]{};
-        size_t count = 4;
+        napi_value args[5]{};
+        size_t count = 5;
         int fd = -1;
         if (napi_get_cb_info(env, info, &count, args, nullptr, nullptr) != napi_ok ||
-            count != 4 || napi_get_value_int32(env, args[1], &fd) != napi_ok || fd < 0)
+            count < 4 || napi_get_value_int32(env, args[1], &fd) != napi_ok || fd < 0)
             throw std::runtime_error("Expected resources, RAW file descriptor and parameter JSON");
+        const auto operation = count == 5 ? operationFor(env, args[4]) : nullptr;
+        checkCancelled(operation);
         const auto path = readText(env, args[0]);
         const auto params = readText(env, args[2]);
         auto engine = acquireEngine(path);
         std::unique_ptr<spk_session, decltype(&spk_session_release)> session(nullptr, spk_session_release);
         uint32_t width, height;
         {
-            auto raw = readRaw(fd, readText(env, args[3]));
+            auto raw = readRaw(fd, readText(env, args[3]), operation);
             width = raw->width;
             height = raw->height;
             const spk_image input{raw->rgb.data(), width, height, 3};
             session.reset(spk_open(engine, &input, params.c_str(), nullptr));
         }
         napi_value result{}, w{}, h{};
-        auto pixels = finishRender(env, engine, session.get(), width, height);
+        auto pixels = finishRender(env, engine, session.get(), width, height, operation);
         if (napi_create_object(env, &result) != napi_ok ||
             napi_create_uint32(env, width, &w) != napi_ok || napi_create_uint32(env, height, &h) != napi_ok ||
             napi_set_named_property(env, result, "pixels", pixels) != napi_ok ||
@@ -218,6 +283,9 @@ napi_value renderRaw(napi_env env, napi_callback_info info) {
             napi_set_named_property(env, result, "height", h) != napi_ok)
             throw std::runtime_error("Cannot return RAW print");
         return result;
+    } catch (const Cancelled& error) {
+        napi_throw_error(env, nullptr, error.what());
+        return nullptr;
     } catch (const std::exception& error) {
         cachedEngine.reset();
         napi_throw_error(env, nullptr, error.what());
@@ -229,15 +297,16 @@ napi_value renderRaw(napi_env env, napi_callback_info info) {
 napi_value decodeRaw(napi_env env, napi_callback_info info) {
     std::lock_guard<std::mutex> lock(resourcesMutex);
     try {
-        napi_value args[2]{};
-        size_t count = 2;
+        napi_value args[3]{};
+        size_t count = 3;
         int fd = -1;
         if (napi_get_cb_info(env, info, &count, args, nullptr, nullptr) != napi_ok ||
-            count != 2 || napi_get_value_int32(env, args[0], &fd) != napi_ok || fd < 0)
+            count < 2 || napi_get_value_int32(env, args[0], &fd) != napi_ok || fd < 0)
             throw std::runtime_error("Expected RAW file descriptor");
+        const auto operation = count == 3 ? operationFor(env, args[2]) : nullptr;
         std::string warning;
         const auto decodeStarted = std::chrono::steady_clock::now();
-        auto raw = readRaw(fd, readText(env, args[1]), &warning);
+        auto raw = readRaw(fd, readText(env, args[1]), operation, &warning);
         const auto displayStarted = std::chrono::steady_clock::now();
         const double displayGain = harmony_raw::display_gain(raw->rgb);
         std::string rawInfo = raw->metadata.libraw_version + " | " +
@@ -257,6 +326,7 @@ napi_value decodeRaw(napi_env env, napi_callback_info info) {
         auto out = static_cast<float*>(destination);
         auto rgba = static_cast<uint8_t*>(displayDestination);
         for (long y = 0; y < height; ++y) {
+            if (y % 32 == 0) checkCancelled(operation);
             const size_t sy = (2 * y + 1) * raw->height / (2 * height);
             for (long x = 0; x < width; ++x) {
                 const size_t sx = (2 * x + 1) * raw->width / (2 * width);
@@ -282,6 +352,9 @@ napi_value decodeRaw(napi_env env, napi_callback_info info) {
             napi_set_named_property(env, result, "height", h) != napi_ok)
             throw std::runtime_error("Cannot return RAW preview");
         return result;
+    } catch (const Cancelled& error) {
+        napi_throw_error(env, nullptr, error.what());
+        return nullptr;
     } catch (const std::exception& error) {
         cachedEngine.reset();
         napi_throw_error(env, nullptr, error.what());
@@ -307,15 +380,54 @@ napi_value clearResources(napi_env env, napi_callback_info info) {
     return result;
 }
 
+napi_value beginOperation(napi_env env, napi_callback_info) {
+    std::lock_guard<std::mutex> lock(operationsMutex);
+    do { ++nextOperation; } while (nextOperation == 0 || operations.count(nextOperation));
+    operations.emplace(nextOperation, std::make_shared<Operation>());
+    napi_value result{};
+    napi_create_uint32(env, nextOperation, &result);
+    return result;
+}
+
+napi_value cancelOperation(napi_env env, napi_callback_info info) {
+    napi_value arg{}, result{};
+    size_t count = 1;
+    if (napi_get_cb_info(env, info, &count, &arg, nullptr, nullptr) == napi_ok && count == 1) {
+        if (const auto operation = operationFor(env, arg)) {
+            std::lock_guard<std::mutex> lock(operation->mutex);
+            operation->cancelled.store(true);
+            if (operation->session) spk_cancel(operation->session, nullptr);
+        }
+    }
+    napi_get_undefined(env, &result);
+    return result;
+}
+
+napi_value endOperation(napi_env env, napi_callback_info info) {
+    napi_value arg{}, result{};
+    size_t count = 1;
+    uint32_t id = 0;
+    if (napi_get_cb_info(env, info, &count, &arg, nullptr, nullptr) == napi_ok && count == 1 &&
+        napi_get_value_uint32(env, arg, &id) == napi_ok) {
+        std::lock_guard<std::mutex> lock(operationsMutex);
+        operations.erase(id);
+    }
+    napi_get_undefined(env, &result);
+    return result;
+}
+
 napi_value init(napi_env env, napi_value exports) {
     napi_property_descriptor desc[] = {
         {"render", nullptr, render<false>, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"renderLinear", nullptr, render<true>, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"renderRaw", nullptr, renderRaw, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"decodeRaw", nullptr, decodeRaw, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"clearResources", nullptr, clearResources, nullptr, nullptr, nullptr, napi_default, nullptr}
+        {"clearResources", nullptr, clearResources, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"beginOperation", nullptr, beginOperation, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"cancelOperation", nullptr, cancelOperation, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"endOperation", nullptr, endOperation, nullptr, nullptr, nullptr, napi_default, nullptr}
     };
-    if (napi_define_properties(env, exports, 5, desc) != napi_ok) return nullptr;
+    if (napi_define_properties(env, exports, sizeof desc / sizeof desc[0], desc) != napi_ok) return nullptr;
     return exports;
 }
 napi_module module{1, 0, nullptr, init, "spektralab", nullptr, {}};

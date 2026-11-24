@@ -15,8 +15,11 @@ export struct FormatPhotoPicker {
   @State private updating: boolean = false;
   @State private message: string = '';
   @State private showFormatHelp: boolean = false;
+  private requestedFormat: string = '全部';
+  private active: boolean = false;
 
   aboutToAppear(): void {
+    this.active = true;
     this.options.MIMEType = photoAccessHelper.PhotoViewMIMETypes.IMAGE_TYPE;
     this.options.selectMode = SelectMode.MULTI_SELECT;
     this.options.maxSelectNumber = 1;
@@ -30,21 +33,31 @@ export struct FormatPhotoPicker {
     this.options.isPhotoTakingSupported = false;
   }
 
+  aboutToDisappear(): void { this.active = false; }
+
   private async filter(format: string): Promise<void> {
-    if (!this.ready || this.updating || format === this.format) return;
+    if (!this.ready || format === this.requestedFormat) return;
+    this.requestedFormat = format;
+    if (this.updating) return;
     this.updating = true;
     this.message = '';
     try {
-      await this.controller.updatePickerOptions({
-        mimeTypeFilter: { mimeTypeArray: format === '全部' ? ['image/*'] :
-          ['image/x-adobe-dng', 'image/x-canon-cr2', 'image/x-canon-cr3',
-            'image/x-nikon-nef', 'image/x-nikon-nrw', 'image/x-sony-arw',
-            'image/x-fuji-raf', 'image/x-panasonic-rw2', 'image/x-olympus-orf', 'image/x-pentax-pef'] },
-        preselectedUris: []
-      });
-      this.uri = '';
-      this.format = format;
+      while (this.active && this.requestedFormat !== this.format) {
+        const next = this.requestedFormat;
+        await this.controller.updatePickerOptions({
+          mimeTypeFilter: { mimeTypeArray: next === '全部' ? ['image/*'] :
+            ['image/x-adobe-dng', 'image/x-canon-cr2', 'image/x-canon-cr3',
+              'image/x-nikon-nef', 'image/x-nikon-nrw', 'image/x-sony-arw',
+              'image/x-fuji-raf', 'image/x-panasonic-rw2', 'image/x-olympus-orf', 'image/x-pentax-pef'] },
+          preselectedUris: []
+        });
+        if (!this.active) return;
+        this.uri = '';
+        this.format = next;
+      }
     } catch (err) {
+      if (!this.active) return;
+      this.requestedFormat = this.format;
       AppLog.failure('photo filter', err as BusinessError);
       this.message = '切换格式失败，请重试';
     } finally { this.updating = false; }
@@ -62,7 +75,7 @@ export struct FormatPhotoPicker {
         ForEach(['全部', 'RAW'], (format: string) => {
           Button(format).backgroundColor(this.format === format ? '#EFBD70' : '#302F30')
             .fontColor(this.format === format ? '#171819' : '#ECEAE5')
-            .enabled(this.ready && !this.updating).onClick(() => this.filter(format))
+            .enabled(this.ready).onClick(() => this.filter(format))
         })
         Blank().layoutWeight(1)
         Button({type: ButtonType.Circle}) {

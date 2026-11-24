@@ -18,6 +18,9 @@ struct Feedback {
   @State private picking: boolean = false;
   @State private message: string = '';
   @State private opening: boolean = false;
+  private mailRevision: number = 0;
+
+  aboutToDisappear(): void { this.mailRevision++; }
 
   private async pickScreenshot(): Promise<void> {
     this.picking = true;
@@ -48,6 +51,7 @@ struct Feedback {
 
   private async feedback(): Promise<void> {
     if (this.opening || this.picking || !this.description.trim()) return;
+    const revision = ++this.mailRevision;
     this.opening = true;
     this.message = '';
     const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
@@ -55,6 +59,7 @@ struct Feedback {
     try {
       const attachments = [encodeURI(AppLog.snapshot(ctx))];
       if (this.screenshot) attachments.push(encodeURI(await this.copyScreenshot(ctx.cacheDir, this.screenshot)));
+      if (revision !== this.mailRevision) return;
       const steps = this.steps.trim();
       const body = '问题描述\n' + this.description.trim() + (steps ? '\n\n复现步骤\n' + steps : '');
       ready = true;
@@ -65,13 +70,15 @@ struct Feedback {
         'ability.params.stream': attachments,
         'ability.want.params.uriPermissionFlag': wantConstant.Flags.FLAG_AUTH_READ_URI_PERMISSION
       }, { onError: (code: number) => {
+        if (revision !== this.mailRevision) return;
         AppLog.record('mail error code=' + code);
         this.message = '无法打开邮件应用，请确认已安装并启用邮件应用';
       } });
     } catch (err) {
+      if (revision !== this.mailRevision) return;
       AppLog.record((ready ? 'mail' : 'snapshot') + ' error code=' + (err as BusinessError).code);
       this.message = ready ? '无法打开邮件应用，请确认已安装并启用邮件应用' : '无法准备反馈附件，请重试';
-    } finally { this.opening = false; }
+    } finally { if (revision === this.mailRevision) this.opening = false; }
   }
 
   build() {
@@ -100,11 +107,15 @@ struct Feedback {
               Button('移除截图').backgroundColor('#303032').onClick(() => { this.screenshot = ''; })
             }
           }.enabled(!this.opening && !this.picking)
-          Text('提交后将打开邮件应用，并附上最近的运行日志。').fontSize(14).fontColor('#CECAC4')
+          Text('打开邮件应用并附上最近的运行日志。').fontSize(14).fontColor('#CECAC4')
           if (this.message) { Text(this.message).fontColor('#EFBD70') }
-          Button('提交', {type: ButtonType.Normal}).width('100%').borderRadius(10).backgroundColor('#EFBD70')
-            .fontColor('#32271D').enabled(!!this.description.trim() && !this.opening && !this.picking)
-            .onClick(() => this.feedback())
+          Button(this.opening ? '取消准备' : '打开邮件', {type: ButtonType.Normal})
+            .width('100%').borderRadius(10).backgroundColor('#EFBD70')
+            .fontColor('#32271D').enabled(this.opening || (!!this.description.trim() && !this.picking))
+            .onClick(() => {
+              if (this.opening) { this.mailRevision++; this.opening = false; }
+              else this.feedback();
+            })
         }.alignItems(HorizontalAlign.Start).width('100%').padding({top: 18, bottom: 18})
       }.layoutWeight(1).align(Alignment.TopStart)
     }.width('100%').height('100%').backgroundColor('#171819')
