@@ -5,6 +5,10 @@ import { preferences } from '@kit.ArkData';
 import { window } from '@kit.ArkUI';
 
 export default class EntryAbility extends UIAbility {
+  onForeground(): void { AppStorage.setOrCreate('appInForeground', true); }
+
+  onBackground(): void { AppStorage.setOrCreate('appInForeground', false); }
+
   onCreate(want: Want): void {
     if (BuildProfile.DEBUG) {
       AppStorage.setOrCreate('updatePreviewAvailable', want.parameters?.['updatePreview'] === 'available');

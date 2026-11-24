@@ -12,7 +12,8 @@ const REPOSITORY = 'https://github.com/JamesQiu2005/SpektraLab';
 struct Settings {
   @StorageLink('exportFormat') private exportFormat: string = 'JPEG';
   @State private supportedFormats: string[] = [];
-  @State private savingFormat: boolean = false;
+  private flushingFormat: boolean = false;
+  private formatRevision: number = 0;
   @State private message: string = '';
   @StorageProp('darkroomTop') private topInset: number = 0;
   @StorageProp('darkroomBottom') private bottomInset: number = 0;
@@ -36,17 +37,28 @@ struct Settings {
   }
 
   private async selectFormat(format: string): Promise<void> {
-    if (this.savingFormat || this.exportFormat === format) return;
-    this.savingFormat = true;
+    if (this.exportFormat === format && !this.message) return;
     this.message = '';
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    let settings: preferences.Preferences;
     try {
-      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
-      const settings = preferences.getPreferencesSync(context, {name: 'settings'});
+      settings = preferences.getPreferencesSync(context, {name: 'settings'});
       settings.putSync('exportFormat', format);
-      await settings.flush();
       this.exportFormat = format;
-    } catch (_) { this.message = '设置保存失败，请重试'; }
-    finally { this.savingFormat = false; }
+      this.formatRevision++;
+    } catch (_) {
+      this.message = '设置保存失败，请重试';
+      return;
+    }
+    if (this.flushingFormat) return;
+    this.flushingFormat = true;
+    let flushed: number;
+    do {
+      flushed = this.formatRevision;
+      try { await settings.flush(); }
+      catch (_) { if (flushed === this.formatRevision) this.message = '设置保存失败，请重试'; }
+    } while (flushed !== this.formatRevision);
+    this.flushingFormat = false;
   }
 
   build() {
@@ -64,7 +76,7 @@ struct Settings {
                 .layoutWeight(1).height(44).borderRadius(10)
                 .backgroundColor(this.exportFormat === format ? '#EFBD70' : '#303032')
                 .fontColor(this.exportFormat === format ? '#32271D' : '#ECEAE5')
-                .enabled(this.supported(format) && !this.savingFormat)
+                .enabled(this.supported(format))
                 .onClick(() => { this.selectFormat(format); })
             })
           }.width('100%')
@@ -78,14 +90,14 @@ struct Settings {
             .padding({top: 10, bottom: 10}).onClick(() => {
               if (this.versionTaps.tap(Date.now())) this.getUIContext().getRouter().pushUrl({url: 'pages/Credits'});
             })
-          AppUpdates({
-            controls: true,
-            onFeedback: () => this.getUIContext().getRouter().pushUrl({url: 'pages/Feedback'})
-          })
+          AppUpdates({controls: true})
           Divider().color('#454446').margin({top: 8, bottom: 8})
           Text('开源声明').fontSize(18).fontWeight(FontWeight.Medium).fontColor('#F1EDE7')
           Text('本应用基于开源项目 SpektraLab 开发。').fontSize(16).fontColor('#ECEAE5')
           Hyperlink(REPOSITORY, 'JamesQiu2005/SpektraLab').color('#EFBD70')
+          Divider().color('#454446').margin({top: 8, bottom: 8})
+          Button('反馈问题',{type: ButtonType.Normal}).borderRadius(10).backgroundColor('#EFBD70').fontColor('#32271D')
+            .onClick(() => this.getUIContext().getRouter().pushUrl({url: 'pages/Feedback'}))
         }.alignItems(HorizontalAlign.Start).width('100%').padding({top: 18, bottom: 18})
       }.layoutWeight(1).align(Alignment.TopStart)
     }.width('100%').height('100%').backgroundColor('#171819')

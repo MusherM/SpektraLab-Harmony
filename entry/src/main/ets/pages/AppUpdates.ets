@@ -74,11 +74,11 @@ struct ReleaseNotesDialog {
 @Component
 export struct AppUpdates {
   controls: boolean = false;
-  onFeedback: () => void = () => {};
   @Prop @Watch('automaticCheck') ready: boolean = false;
   @State private checking: boolean = false;
   @State private message: string = '';
   private active: boolean = false;
+  private checkRevision: number = 0;
   private prompt: CustomDialogController = new CustomDialogController({
     builder: UpdatePrompt({onLater: () => this.later(), onStore: () => this.openStore()}),
     customStyle: true, alignment: DialogAlignment.Center, autoCancel: false, maskColor: '#99000000'
@@ -92,8 +92,14 @@ export struct AppUpdates {
 
   aboutToDisappear(): void {
     this.active = false;
+    this.stopCheck();
     this.prompt.close();
     this.notes.close();
+  }
+
+  private stopCheck(): void {
+    this.checkRevision++;
+    this.checking = false;
   }
 
   private context(): common.UIAbilityContext {
@@ -108,21 +114,24 @@ export struct AppUpdates {
 
   private async check(manual: boolean): Promise<void> {
     if (this.checking) return;
+    const revision = ++this.checkRevision;
     this.checking = true;
     this.message = '';
     try {
       if (!manual && !AppUpdateService.automaticAllowed(this.context())) return;
       const available = await AppUpdateService.hasUpdate(this.context());
       const page = this.getUIContext().getRouter().getState().name;
-      if (!this.active || (manual ? page !== 'Settings' : page !== 'Index' || !this.ready)) return;
+      if (!this.active || revision !== this.checkRevision ||
+        (manual ? page !== 'Settings' : page !== 'Index' || !this.ready)) return;
       if (available) {
         this.prompt.open();
         AppLog.record('update prompt opened ' + (manual ? 'manual' : 'automatic'));
       } else if (manual) this.message = '当前已是最新版本';
     } catch (err) {
+      if (revision !== this.checkRevision) return;
       AppLog.failure('update check', err as BusinessError);
       if (manual) this.message = '检查更新失败，请稍后重试';
-    } finally { this.checking = false; }
+    } finally { if (revision === this.checkRevision) this.checking = false; }
   }
 
   private later(): boolean {
@@ -148,26 +157,17 @@ export struct AppUpdates {
     }
   }
 
-  @Styles
-  actionStyle() {
-    .layoutWeight(1).height(48).borderRadius(10).padding({left: 4, right: 4})
-    .backgroundColor('#303032')
-  }
-
   build() {
     if (this.controls) {
-      Column({space: 10}) {
-        Row({space: 8}) {
-          Button(this.checking ? '正在检查' : '检查更新', {type: ButtonType.Normal})
-            .actionStyle().fontSize(14).fontWeight(FontWeight.Medium).fontColor('#F1EDE7')
-            .enabled(!this.checking).id('check-updates').onClick(() => { this.check(true); })
+      Column({space: 12}) {
+        Row({space: 10}) {
+          Button(this.checking ? '取消检查' : '检查更新', {type: ButtonType.Normal})
+            .height(44).borderRadius(10).fontSize(16).backgroundColor('#303032').fontColor('#ECEAE5')
+            .id('check-updates').onClick(() => { if (this.checking) this.stopCheck(); else this.check(true); })
           Button('更新日志', {type: ButtonType.Normal})
-            .actionStyle().fontSize(14).fontWeight(FontWeight.Medium).fontColor('#F1EDE7')
+            .height(44).borderRadius(10).fontSize(16).backgroundColor('#303032').fontColor('#ECEAE5')
             .id('show-release-notes').onClick(() => { this.notes.open(); })
-          Button('反馈问题', {type: ButtonType.Normal})
-            .actionStyle().fontSize(14).fontWeight(FontWeight.Medium).fontColor('#F1EDE7')
-            .id('open-feedback').onClick(() => { this.onFeedback(); })
-        }.width('100%').constraintSize({maxWidth: 480})
+        }.width('100%')
         if (this.message) { Text(this.message).fontSize(14).fontColor('#C8BEB2').width('100%') }
       }.width('100%').alignItems(HorizontalAlign.Start)
     }

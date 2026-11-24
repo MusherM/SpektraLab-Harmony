@@ -5,11 +5,12 @@ import { FormatPhotoPicker } from './FormatPhotoPicker';
 import { HomeGallery, HomeRecipe } from './HomeGallery';
 import { AppUpdates } from './AppUpdates';
 import { exportTitle } from '../common/MaterialNames';
-import { centeredBorderFraming } from '../common/BorderFraming';
+import { BorderFraming, centeredBorderFraming } from '../common/BorderFraming';
 import { materialOrder, moveVisibleMaterial } from '../common/MaterialOrder';
 import { preferences } from '@kit.ArkData';
 import { horizontalAdjustment } from '../common/InteractionRules';
 import { AppLog } from '../common/AppLog';
+import { AppReviewService } from '../common/AppReviewService';
 import { exportMime, exportExtension } from '../common/ExportFormat';
 import { straightPhotoPixels } from '../common/PhotoPixels';
 import { rawPreviewRotation, orientedPixelMap } from '../common/RawOrientation';
@@ -22,6 +23,9 @@ import { fileIo as fs, fileUri, picker } from '@kit.CoreFileKit';
 import { taskpool, util } from '@kit.ArkTS';
 import { availableFrameBorders, borderAperture, BUILT_IN_FRAME_BORDERS, composeBorder, FrameBorder, loadBorderOverlay, NO_FRAME } from './FrameBorders';
 import { FrameBorderCard } from './FrameBorderCard';
+import { ExportAttempt } from '../common/ExportAttempt';
+import { MaterialPager } from './MaterialPager';
+import { materialFanPlacement, FanPlacement } from '../common/MaterialPagerRules';
 import nativeEngine, { RawFrame } from 'libspektralab.so';
 
 import { curves, uiMaterial } from '@kit.ArkUI';
@@ -35,6 +39,13 @@ const HANDLE_HEIGHT: number = 44;
 const COLLAPSED_HEIGHT: number = HANDLE_HEIGHT + 12;
 const BORDER_TAB: number = 2;
 const ADJUST_TAB: number = 3;
+
+interface MaterialPage {
+  id: string;
+  name: string;
+  stock?: Stock;
+  border?: FrameBorder;
+}
 
 @Component
 struct DevelopingFilm {
@@ -120,15 +131,15 @@ interface Stock {
 }
 @Concurrent
 function renderPixels(path: string, input: ArrayBuffer, width: number, height: number,
-  params: string, linear: boolean, rotation: number, geometry: PhotoGeometry): image.PixelMap {
-  const rgba = linear ? nativeEngine.renderLinear(path, input, width, height, params) :
-    nativeEngine.render(path, input, width, height, params);
+  params: string, linear: boolean, rotation: number, geometry: PhotoGeometry, operation: number): image.PixelMap {
+  const rgba = linear ? nativeEngine.renderLinear(path, input, width, height, params, operation) :
+    nativeEngine.render(path, input, width, height, params, operation);
   return geometryMap(rgba, width, height, rotation, geometry);
 }
 
 @Concurrent
 function frameExport(photo: image.PixelMap, border: FrameBorder, overlay: image.PixelMap | undefined,
-  film: string, framing: PhotoGeometry | undefined): image.PixelMap {
+  film: string, framing: BorderFraming | undefined): image.PixelMap {
   return composeBorder(photo, border, overlay, film, 0, framing);
 }
 
@@ -136,31 +147,38 @@ function frameExport(photo: image.PixelMap, border: FrameBorder, overlay: image.
 function clearNativeResources(releaseEngine: boolean): void { nativeEngine.clearResources(releaseEngine); }
 
 @Concurrent
-function decodeRaw(fd: number, cacheDir: string): RawFrame { return nativeEngine.decodeRaw(fd, cacheDir); }
+function decodeRaw(fd: number, cacheDir: string, operation: number): RawFrame {
+  return nativeEngine.decodeRaw(fd, cacheDir, operation);
+}
 
 @Concurrent
 function renderRawPrint(path: string, fd: number, params: string, cacheDir: string, rotation: number,
-  geometry: PhotoGeometry): image.PixelMap {
-  const frame = nativeEngine.renderRaw(path, fd, params, cacheDir);
+  geometry: PhotoGeometry, operation: number): image.PixelMap {
+  const frame = nativeEngine.renderRaw(path, fd, params, cacheDir, operation);
   return geometryMap(frame.pixels, frame.width, frame.height, rotation, geometry);
 }
 
 @CustomDialog
 struct LeaveEditorDialog {
   controller: CustomDialogController;
+  title: string = '放弃本次调整？';
+  detail: string = '未保存的调整将丢失，原照片会保留。';
+  confirmLabel: string = '放弃调整';
+  keepLabel: string = '继续编辑';
+  keep: () => void = () => {};
   discard: () => void = () => {};
 
   build() {
     Column({space: 12}) {
-      Text('放弃本次调整？').fontSize(20).fontWeight(FontWeight.Medium).fontColor('#F2ECE5')
-      Text('未保存的调整将丢失，原照片会保留。').fontSize(14).fontColor('#C8BEB2')
+      Text(this.title).fontSize(20).fontWeight(FontWeight.Medium).fontColor('#F2ECE5')
+      Text(this.detail).fontSize(14).fontColor('#C8BEB2')
       Row({space: 10}) {
-        Button('放弃调整', {type: ButtonType.Normal})
+        Button(this.confirmLabel, {type: ButtonType.Normal})
           .layoutWeight(1).height(44).borderRadius(CORNER_RADIUS).backgroundColor('#343233').fontColor('#ECE5DC')
-          .onClick(() => { this.controller.close(); this.discard(); })
-        Button('继续编辑', {type: ButtonType.Normal})
+          .onClick(() => { this.discard(); this.controller.close(); })
+        Button(this.keepLabel, {type: ButtonType.Normal})
           .layoutWeight(1).height(44).borderRadius(CORNER_RADIUS).backgroundColor('#EFBD70').fontColor('#32271D')
-          .defaultFocus(true).onClick(() => this.controller.close())
+          .defaultFocus(true).onClick(() => { this.keep(); this.controller.close(); })
       }.width('100%').margin({top: 10})
     }.width('88%').constraintSize({maxWidth: 360}).alignItems(HorizontalAlign.Start)
       .padding(22).borderRadius(16).backgroundColor('#242426').border({width: 0.5, color: '#50473F'})
@@ -195,13 +213,25 @@ struct Index {
   private heightPx: number = 0;
 
   private editorActive: boolean = false;
+  private reviewTimer: number = -1;
 
   aboutToAppear(): void { this.editorActive = true; this.prepare(); }
 
-  aboutToDisappear(): void { this.editorActive = false; this.releaseNativeResources(); }
+  onPageHide(): void { this.cancelReviewPrompt(); }
+
+  aboutToDisappear(): void {
+    this.editorActive = false;
+    this.cancelReviewPrompt();
+    this.stopImport();
+    this.importRevision++;
+    this.stopPreview(false);
+    if (this.exportAttempt && !this.exportAttempt.committing) this.finishSaveConfirmation(true);
+    this.resumeSaveAuthorization();
+    this.releaseNativeResources();
+  }
 
   private releaseNativeResources(): void {
-    if (this.busy || this.rendering) return;
+    if (this.busy || this.renderInFlight) return;
     resourceCleanup = resourceCleanup.then(async () => {
       await taskpool.execute(new taskpool.Task(clearNativeResources, true));
     }).catch((err: BusinessError) => {
@@ -216,6 +246,7 @@ struct Index {
       const rm = ctx.resourceManager;
       const decoder = util.TextDecoder.create('utf-8');
       const stocks: Stock[] = JSON.parse(decoder.decodeWithStream(await rm.getRawFileContent('stocks.json'))) as Stock[];
+      if (!this.editorActive) return;
       this.films = stocks.filter((s: Stock) => !s.paper).sort((a: Stock, b: Stock) => a.group.localeCompare(b.group));
       this.papers = stocks.filter((s: Stock) => s.paper);
       this.films.unshift({id: '', name: '未选中', paper: false, group: '', reversal: false,
@@ -231,6 +262,7 @@ struct Index {
           const parent = target.substring(0, target.lastIndexOf('/'));
           if (!fs.accessSync(parent)) fs.mkdirSync(parent, true);
           const bytes = await rm.getRawFileContent(name);
+          if (!this.editorActive) return;
           const file = fs.openSync(target, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
           try {
             if (fs.writeSync(file.fd, bytes.slice().buffer) !== bytes.byteLength) throw new Error('资源写入不完整');
@@ -268,8 +300,7 @@ struct Index {
   }
 
   private compactHeight(): number {
-    return this.tab === BORDER_TAB ? Math.min(244, this.windowHeight * 0.42) :
-      Math.min(310, this.windowHeight * 0.45) + HANDLE_HEIGHT - 2;
+    return Math.min(310, this.windowHeight * 0.45) + HANDLE_HEIGHT - 2;
   }
 
   private panelHeight(): number {
@@ -279,6 +310,7 @@ struct Index {
   }
 
   private snapPanel(target: number): void {
+    if (target !== 1) this.hideFan();
     this.panel = target;
     this.updateMaterialOrderHint();
     this.getUIContext().animateTo({curve: curves.interpolatingSpring(0, 1, 245, 23)}, () => {
@@ -286,6 +318,8 @@ struct Index {
     });
   }
   @State private rendering: boolean = false;
+  private renderInFlight: boolean = false;
+  private previewOperation: number = 0;
   @State private matched: boolean = false;
   @State private values: number[] = [0, 1, 1, 1];
   private pinchStart: number = 1;
@@ -319,18 +353,19 @@ struct Index {
   }
 
   private async pixels(input: ArrayBuffer, w: number, h: number, linear: boolean,
-    film: string, paper: string): Promise<image.PixelMap> {
+    film: string, paper: string, operation: number): Promise<image.PixelMap> {
     const pixels = input.slice(0);
     const task = new taskpool.Task(renderPixels, this.assets, pixels, w, h,
-      this.params(film, paper, linear), linear, this.rawRotation, fullPhoto());
+      this.params(film, paper, linear), linear, this.rawRotation, fullPhoto(), operation);
     task.setTransferList([pixels]);
     return await taskpool.execute(task) as image.PixelMap;
   }
 
-  private async readPhoto(fd: number, preview: boolean): Promise<RawFrame> {
+  private async readPhoto(fd: number, preview: boolean, cancelled: () => boolean): Promise<RawFrame> {
     const source = image.createImageSource(fd);
     try {
       const info = await source.getImageInfo();
+      if (cancelled()) throw new Error('Photo decode cancelled');
       const scale = preview ? Math.min(1, 2048 / Math.max(info.size.width, info.size.height)) : 1;
       const size: image.Size = { width: Math.max(1, Math.round(info.size.width * scale)),
         height: Math.max(1, Math.round(info.size.height * scale)) };
@@ -338,10 +373,12 @@ struct Index {
         desiredPixelFormat: image.PixelMapFormat.RGBA_8888,
         desiredDynamicRange: image.DecodingDynamicRange.SDR });
       try {
+        if (cancelled()) throw new Error('Photo decode cancelled');
         // Convert pixels before discarding the source's ICC/color-space metadata.
         await map.applyColorSpace(colorSpaceManager.create(colorSpaceManager.ColorSpace.SRGB));
         let orientation = '1';
         try { orientation = await source.getImageProperty(image.PropertyKey.ORIENTATION); } catch (_) {}
+        if (cancelled()) throw new Error('Photo decode cancelled');
         const names = ['Top-left','Top-right','Bottom-right','Bottom-left','Left-top','Right-top','Right-bottom','Left-bottom'];
         const o = Number(orientation) || names.indexOf(orientation) + 1;
         if (o === 2 || o === 5 || o === 7) await map.flip(true, false);
@@ -360,10 +397,23 @@ struct Index {
   }
 
   @State private importing: boolean = false;
+  private importRevision: number = 0;
+  private importOperation: number = 0;
+  private exportAttempt?: ExportAttempt;
+  @State private waitingForSaveGrant: boolean = false;
+  private resumeSaveGrant?: () => void;
+  private replacementUri: string = '';
+  private replacementRecipe?: HomeRecipe;
 
   @State private borderId: string = '';
   @State private borderLoading: boolean = false;
   @State private borderListWidth: number = 336;
+  private readonly borderStripScroller: Scroller = new Scroller();
+  private readonly materialStripScroller: Scroller = new Scroller();
+  @State private fanVisible: boolean = false;
+  @State private fanPosition: number = 0;
+  @State private fanPages: MaterialPage[] = [];
+  @State private fanHeight: number = 170;
   private borderRequest: number = 0;
   private borderOverlay?: image.PixelMap;
   @State private borderSourceRevision: number = 0;
@@ -375,7 +425,7 @@ struct Index {
 
   @State private cropOpen: boolean = false;
   @State private framingOpen: boolean = false;
-  private readonly borderFramings: Map<string, PhotoGeometry> = new Map<string, PhotoGeometry>();
+  private readonly borderFramings: Map<string, BorderFraming> = new Map<string, BorderFraming>();
   @State private croppedOriginal?: image.PixelMap = undefined;
   @State private croppedPreview?: image.PixelMap = undefined;
   private geometry: PhotoGeometry = fullPhoto();
@@ -459,17 +509,19 @@ struct Index {
     return border.id + ':' + angle;
   }
 
-  private framingFor(border: FrameBorder, angle: number = this.geometry.angle): PhotoGeometry | undefined {
+  private framingFor(border: FrameBorder, angle: number = this.geometry.angle): BorderFraming | undefined {
     return this.borderFramings.get(this.framingKey(border, angle));
   }
 
   private canAdjustFraming(): boolean {
     const border = this.currentBorder();
-    const aperture = borderAperture(border);
     const size = this.borderBase()?.getImageInfoSync().size;
-    if (!aperture || !size) return false;
-    return !!this.framingFor(border) ||
-      Math.min(Math.abs(size.width - size.height * aperture), Math.abs(size.height - size.width / aperture)) > 1;
+    if (!size || !border.windows.length) return false;
+    return !!this.framingFor(border) || border.windows.some((_window: number[], index: number) => {
+      const aperture = borderAperture(border, index);
+      return Math.min(Math.abs(size.width - size.height * aperture),
+        Math.abs(size.height - size.width / aperture)) > 1;
+    });
   }
 
   private defaultFraming(): PhotoGeometry {
@@ -502,11 +554,14 @@ struct Index {
     const isDefault = Math.abs(next.left - initial.left) < 1e-6 && Math.abs(next.right - initial.right) < 1e-6 &&
       Math.abs(next.top - initial.top) < 1e-6 && Math.abs(next.bottom - initial.bottom) < 1e-6;
     const key = this.framingKey(border, this.geometry.angle);
+    const size = photo.getImageInfoSync().size;
+    const framing: BorderFraming = {angle: next.angle, ratio: next.ratio, left: next.left,
+      top: next.top, right: next.right, bottom: next.bottom, baseAspect: size.width / size.height};
     try {
       this.setFramed(composeBorder(isDefault ? photo : full, border, this.borderOverlay,
-        this.borderFilm(this.goodFilm), 0, isDefault ? undefined : next));
+        this.borderFilm(this.goodFilm), 0, isDefault ? undefined : framing));
       if (isDefault) this.borderFramings.delete(key);
-      else this.borderFramings.set(key, next);
+      else this.borderFramings.set(key, framing);
       this.borderSourceRevision++;
       this.dirty = true;
       this.resetZoom();
@@ -533,7 +588,7 @@ struct Index {
   }
 
   private async chooseBorder(border: FrameBorder): Promise<void> {
-    if (this.busy || this.rendering || !this.original) return;
+    if (this.busy || !this.original) return;
     if (!this.borderLoading && border.id === this.borderId) return;
     const request = ++this.borderRequest;
     this.borderLoading = true;
@@ -573,7 +628,8 @@ struct Index {
   @State private choosingPhoto: boolean = false;
 
   private choosePhoto(recipe?: HomeRecipe): void {
-    if (this.busy || this.rendering || !this.assets) return;
+    if ((this.busy && !this.importing) || !this.assets) return;
+    this.stopImport();
     this.pendingRecipe = recipe;
     this.choosingPhoto = true;
   }
@@ -586,28 +642,67 @@ struct Index {
   private async confirmPhoto(uri: string): Promise<void> {
     const recipe = this.pendingRecipe;
     this.cancelPhoto();
-    await this.open(uri, recipe);
+    this.requestPhoto(uri, recipe);
   }
 
   private async chooseFile(): Promise<void> {
-    if (this.busy || this.rendering || !this.assets) return;
+    if ((this.busy && !this.importing) || !this.assets) return;
+    this.stopImport();
     try {
       const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
       const options = new picker.DocumentSelectOptions();
       options.maxSelectNumber = 1;
       const uris = await new picker.DocumentViewPicker(context).select(options);
-      if (uris.length > 0) await this.open(uris[0]);
+      if (this.editorActive && uris.length > 0) this.requestPhoto(uris[0]);
     } catch (err) {
       AppLog.failure('file picker', err as BusinessError);
       this.message = '无法打开文件选择器，请重试';
     }
   }
 
+  private requestPhoto(uri: string, recipe?: HomeRecipe): void {
+    if (this.original && (this.dirty || this.rendering || !this.matched || this.borderLoading)) {
+      this.replacementUri = uri;
+      this.replacementRecipe = recipe;
+      this.replaceDialog.open();
+    } else {
+      this.open(uri, recipe);
+    }
+  }
+
+  private finishReplacement(replace: boolean): void {
+    const uri = this.replacementUri;
+    const recipe = this.replacementRecipe;
+    this.replacementUri = '';
+    this.replacementRecipe = undefined;
+    if (replace && uri) this.open(uri, recipe);
+  }
+
+  private currentImport(revision: number): boolean {
+    return this.editorActive && revision === this.importRevision;
+  }
+
+  private stopImport(): void {
+    if (!this.importing) return;
+    nativeEngine.cancelOperation(this.importOperation);
+    this.importRevision++;
+    this.importing = false;
+    this.busy = false;
+    this.message = '';
+    AppLog.record('import cancelled');
+  }
+
   private async open(uri: string, recipe?: HomeRecipe): Promise<void> {
-    if (this.busy || this.rendering || !this.assets) return;
+    if (this.busy || !this.assets) return;
+    const revision = ++this.importRevision;
+    this.stopPreview(true);
+    this.borderRequest++;
+    this.borderLoading = false;
     this.busy = true;
     this.importing = true;
     this.message = '';
+    const operation = nativeEngine.beginOperation();
+    this.importOperation = operation;
     let imported = false;
     try {
       if (recipe && (!this.films.some((stock: Stock) => stock.id === recipe.film) ||
@@ -620,7 +715,9 @@ struct Index {
       const knownRaw = /\.(dng|cr[23w]|nef|nrw|arw|srf|sr2|raf|rw2|orf|pef|ptx|3fr|fff|iiq|rwl|srw|x3f|mrw|mos|kdc|dcr|erf|mef|raw)$/i.test(name);
       let raw = false;
       await resourceCleanup;
+      if (!this.currentImport(revision)) return;
       await taskpool.execute(new taskpool.Task(clearNativeResources, false));
+      if (!this.currentImport(revision)) return;
       AppLog.record('import start');
       const cacheDir = (this.getUIContext().getHostContext() as common.UIAbilityContext).cacheDir;
       const file = fs.openSync(uri, fs.OpenMode.READ_ONLY);
@@ -628,21 +725,24 @@ struct Index {
       let rotation = 0;
       try {
         if (knownPhoto) {
-          frame = await this.readPhoto(file.fd, true);
+          frame = await this.readPhoto(file.fd, true, () => !this.currentImport(revision));
         } else {
           try {
-            frame = await taskpool.execute(new taskpool.Task(decodeRaw, file.fd, cacheDir)) as RawFrame;
+            frame = await taskpool.execute(new taskpool.Task(decodeRaw, file.fd, cacheDir, operation)) as RawFrame;
             raw = true;
             AppLog.record('RAW decoded bytes=' + fs.statSync(file.fd).size + ' ' + (frame.rawInfo ?? ''));
           } catch (err) {
+            if (!this.currentImport(revision)) return;
             if (knownRaw) throw new Error((err as BusinessError).message ?? String(err));
-            frame = await this.readPhoto(file.fd, true);
+            frame = await this.readPhoto(file.fd, true, () => !this.currentImport(revision));
           }
         }
+        if (!this.currentImport(revision)) return;
         if (raw && frame.displayPixels) {
           rotation = await rawPreviewRotation(file.fd, frame.displayPixels, frame.width, frame.height);
         }
       } finally { fs.closeSync(file); }
+      if (!this.currentImport(revision)) return;
       const w = frame.width, h = frame.height;
       if (raw && !frame.displayPixels) throw new Error('RAW 预览数据缺失');
       const buf = frame.displayPixels ?? frame.pixels;
@@ -665,10 +765,15 @@ struct Index {
       oldOriginal?.release();
       imported = true;
     } catch (err) {
+      if (!this.currentImport(revision)) return;
       this.message = '无法处理这张照片，请选择其他照片';
       AppLog.failure('import', err as BusinessError); console.error('SpektraLab import: ' + String(err));
     } finally {
-      this.importing = false; this.busy = false;
+      nativeEngine.endOperation(operation);
+      if (this.importOperation === operation) this.importOperation = 0;
+      if (revision === this.importRevision) {
+        this.importing = false; this.busy = false;
+      }
       if (!this.editorActive) this.releaseNativeResources();
     }
     if (imported && recipe && this.editorActive) {
@@ -680,20 +785,44 @@ struct Index {
     }
   }
 
+  private stopPreview(restore: boolean): void {
+    const wasRendering = this.rendering;
+    this.version++;
+    nativeEngine.cancelOperation(this.previewOperation);
+    this.rendering = false;
+    if (!wasRendering) return;
+    if (restore) {
+      this.film = this.goodFilm;
+      this.paper = this.goodPaper;
+      this.values = this.goodValues.slice();
+      this.matched = true;
+    }
+    if (this.message === '正在冲印') this.message = '';
+    AppLog.record('render cancelled');
+  }
+
   private async process(): Promise<void> {
     this.version++;
+    nativeEngine.cancelOperation(this.previewOperation);
     if (!this.input || !this.hasMaterials()) return;
     this.matched = false;
-    if (this.rendering) return;
     this.rendering = true;
     this.message = '正在冲印';
-    while (this.input && this.hasMaterials()) {
+    if (this.renderInFlight) return;
+    this.renderInFlight = true;
+    while (this.editorActive && this.rendering && this.input && this.hasMaterials()) {
       const version = this.version;
       const sentValues = this.values.slice();
+      const operation = nativeEngine.beginOperation();
+      this.previewOperation = operation;
       AppLog.record('render ' + this.film + ' ' + this.paper);
       try {
-        const next = await this.pixels(this.input, this.widthPx, this.heightPx, this.linear, this.film, this.paper);
-        if (version !== this.version) { await next.release(); continue; }
+        const next = await this.pixels(this.input, this.widthPx, this.heightPx, this.linear, this.film, this.paper, operation);
+        if (version !== this.version) {
+          await next.release();
+          AppLog.record('render superseded');
+          continue;
+        }
         let cropped: image.PixelMap | undefined;
         try {
           cropped = editedPhoto(next, this.geometry);
@@ -711,14 +840,21 @@ struct Index {
         AppLog.record('render complete');
         this.dirty = true; this.matched = sentValues.every((v: number, i: number) => v === this.values[i]); this.message = '';
       } catch (err) {
-        if (version !== this.version) continue;
+        if (version !== this.version) {
+          AppLog.record('render superseded');
+          continue;
+        }
         this.retryFilm = this.film; this.retryPaper = this.paper; this.retryValues = this.values.slice();
         this.film = this.goodFilm; this.paper = this.goodPaper; this.values = this.goodValues.slice();
         this.matched = true; this.message = '冲印失败，请重试或更换材料';
         AppLog.failure('render', err as BusinessError); console.error('SpektraLab render: ' + String(err));
+      } finally {
+        nativeEngine.endOperation(operation);
+        this.previewOperation = 0;
       }
       break;
     }
+    this.renderInFlight = false;
     this.rendering = false;
     if (!this.input || !this.editorActive) this.releaseNativeResources();
   }
@@ -822,6 +958,7 @@ struct Index {
     this.dx = Math.max(-maxX, Math.min(maxX, x)); this.dy = Math.max(-maxY, Math.min(maxY, y));
   }
   private changeTab(index: number): void {
+    this.hideFan();
     this.tab = index;
     this.updateMaterialOrderHint();
   }
@@ -829,11 +966,73 @@ struct Index {
     builder: LeaveEditorDialog({discard: () => this.closePhoto()}),
     customStyle: true, alignment: DialogAlignment.Center, autoCancel: true
   });
+  private replaceDialog: CustomDialogController = new CustomDialogController({
+    builder: LeaveEditorDialog({
+      title: '替换当前照片？', detail: '新照片导入成功后，本次未保存的调整会丢失。',
+      confirmLabel: '替换照片', discard: () => this.finishReplacement(true), keep: () => this.finishReplacement(false)
+    }),
+    customStyle: true, alignment: DialogAlignment.Center, autoCancel: true,
+    cancel: () => this.finishReplacement(false)
+  });
+  private stopSaveDialog: CustomDialogController = new CustomDialogController({
+    builder: LeaveEditorDialog({
+      title: '取消本次保存？', detail: '当前调整会保留，可以稍后再保存。',
+      confirmLabel: '取消保存', keepLabel: '继续保存',
+      discard: () => this.finishSaveConfirmation(true), keep: () => this.finishSaveConfirmation(false)
+    }),
+    customStyle: true, alignment: DialogAlignment.Center, autoCancel: true,
+    cancel: () => this.finishSaveConfirmation(false)
+  });
+
+  private finishSaveConfirmation(cancel: boolean): void {
+    const attempt = this.exportAttempt;
+    if (!attempt) return;
+    attempt.resolveConfirmation(cancel);
+    if (!cancel) return;
+    nativeEngine.cancelOperation(attempt.nativeOperation);
+    this.exportAttempt = undefined;
+    this.busy = false;
+    this.message = '';
+    this.saveHelpOpen = false;
+    this.resumeSaveAuthorization();
+    AppLog.record('export cancelled');
+  }
+
+  private resumeSaveAuthorization(): void {
+    const resume = this.resumeSaveGrant;
+    this.resumeSaveGrant = undefined;
+    this.waitingForSaveGrant = false;
+    resume?.();
+  }
+
+  private async publishExport(ctx: common.UIAbilityContext, attempt: ExportAttempt, temp: string,
+    extension: string, title: string): Promise<string | undefined> {
+    const library = photoAccessHelper.getPhotoAccessHelper(ctx);
+    while (await attempt.beginCommit()) {
+      const request = photoAccessHelper.MediaAssetChangeRequest.createAssetRequest(
+        ctx, photoAccessHelper.PhotoType.IMAGE, extension, {title: title});
+      request.addResource(photoAccessHelper.ResourceType.IMAGE_RESOURCE, fileUri.getUriFromPath(temp));
+      const started = Date.now();
+      try {
+        await library.applyChanges(request);
+        AppLog.record('export write ms=' + (Date.now() - started));
+        return request.getAsset().displayName;
+      } catch (err) {
+        if ((err as BusinessError).code !== 201) throw new Error((err as BusinessError).message);
+        attempt.committing = false;
+        this.waitingForSaveGrant = true;
+        this.message = '请再点一次保存，继续写入相册';
+        await new Promise<void>((resolve) => { this.resumeSaveGrant = resolve; });
+        if (!attempt.cancelled) this.message = '正在保存';
+      }
+    }
+    return undefined;
+  }
 
   private closePhoto(): void {
+    this.hideFan();
+    this.stopPreview(false);
     this.releaseNativeResources();
-    // Invalidate any render still running before releasing its preview.
-    this.version++;
     this.input = undefined;
     const preview = this.preview, original = this.original;
     this.preview = undefined; this.original = undefined;
@@ -847,33 +1046,64 @@ struct Index {
     this.tab = 0; this.panel = 1; this.panelPosition = 1; this.compare = false; this.resetZoom();
     this.updateMaterialOrderHint();
     preview?.release(); original?.release();
+    this.scheduleReviewPrompt();
+  }
+
+  private cancelReviewPrompt(): void {
+    if (this.reviewTimer >= 0) clearTimeout(this.reviewTimer);
+    this.reviewTimer = -1;
+  }
+
+  private scheduleReviewPrompt(): void {
+    this.cancelReviewPrompt();
+    this.reviewTimer = setTimeout(() => {
+      this.reviewTimer = -1;
+      if (!this.editorActive || !AppStorage.get<boolean>('appInForeground') || this.busy ||
+        this.original || this.importing || this.choosingPhoto) return;
+      AppReviewService.requestIfEligible(this.getUIContext().getHostContext() as common.UIAbilityContext);
+    }, 650);
   }
 
   onBackPress(): boolean {
+    this.cancelReviewPrompt();
     if (this.choosingPhoto) { this.cancelPhoto(); return true; }
     if (this.cropOpen) { this.cropOpen = false; return true; }
     if (this.framingOpen) { this.framingOpen = false; return true; }
-    if (this.busy) return true;
+    if (this.exportAttempt) {
+      this.saveHelpOpen = false;
+      if (this.exportAttempt.requestConfirmation()) this.stopSaveDialog.open();
+      return true;
+    }
+    if (this.importing) { this.stopImport(); return true; }
+    if (this.rendering) { this.stopPreview(true); return true; }
+    if (this.borderLoading) {
+      this.borderRequest++;
+      this.borderLoading = false;
+      return true;
+    }
+    if (this.busy) return false;
     if (!this.original) return false;
     if (!this.wide() && this.panel === 2) { this.snapPanel(1); return true; }
-    if (this.dirty || this.rendering || !this.matched) this.leaveDialog.open();
+    if (this.dirty || !this.matched) this.leaveDialog.open();
     else this.closePhoto();
     return true;
   }
-  private async renderOriginal(params: string | undefined, geometry: PhotoGeometry): Promise<image.PixelMap> {
+  private async renderOriginal(params: string | undefined, geometry: PhotoGeometry,
+    attempt: ExportAttempt): Promise<image.PixelMap | undefined> {
     const cacheDir = (this.getUIContext().getHostContext() as common.UIAbilityContext).cacheDir;
     const source = fs.openSync(this.sourceUri, fs.OpenMode.READ_ONLY);
     try {
       if (this.linear) {
         return await taskpool.execute(new taskpool.Task(renderRawPrint, this.assets, source.fd, params ?? '', cacheDir,
-          this.rawRotation, geometry), taskpool.Priority.HIGH) as image.PixelMap;
+          this.rawRotation, geometry, attempt.nativeOperation), taskpool.Priority.HIGH) as image.PixelMap;
       }
-      const frame = await this.readPhoto(source.fd, false);
+      const frame = await this.readPhoto(source.fd, false, () => attempt.cancelled);
+      if (attempt.cancelled) return undefined;
       if (params === undefined) {
         return geometryMap(frame.pixels, frame.width, frame.height, 0, geometry);
       }
       return await taskpool.execute(new taskpool.Task(renderPixels, this.assets, frame.pixels,
-        frame.width, frame.height, params, false, 0, geometry), taskpool.Priority.HIGH) as image.PixelMap;
+        frame.width, frame.height, params, false, 0, geometry, attempt.nativeOperation), taskpool.Priority.HIGH) as image.PixelMap;
     } finally { fs.closeSync(source); }
   }
 
@@ -890,58 +1120,59 @@ struct Index {
 
   private async save(): Promise<void> {
     if (!this.canSave()) return;
+    const attempt = new ExportAttempt();
+    this.exportAttempt = attempt;
     this.busy = true;
     this.message = '正在保存';
     const started = Date.now();
+    const border = this.currentBorder();
+    const framing = this.framingFor(border);
+    const geometry = framing ? fullPhoto() : this.geometry;
+    const title = exportTitle(this.sourceName, this.film, this.paper);
+    const filmName = this.borderFilm(this.film);
+    const params = this.hasMaterials() ? this.params(this.film, this.paper, this.linear, true) : undefined;
     AppLog.record('export start');
     let print: image.PixelMap | undefined;
     let framed: image.PixelMap | undefined;
-    let destination: fs.File | undefined;
+    let overlay: image.PixelMap | undefined;
+    let temp: string = '';
     try {
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
       const encoder = image.createImagePacker();
       let mime: string;
       try { mime = exportMime(this.exportFormat, encoder.supportedFormats); }
       finally { await encoder.release(); }
+      if (attempt.cancelled) return;
       const extension = exportExtension(mime);
-      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
-      // Acquire the destination while the SaveButton grant is active.
-      const withMaterials = this.hasMaterials();
-      const title = exportTitle(this.sourceName, this.film, this.paper);
-      const uri = await photoAccessHelper.getPhotoAccessHelper(ctx).createAsset(
-        photoAccessHelper.PhotoType.IMAGE, extension, {title: title});
-      const savedName = new fileUri.FileUri(uri).name;
-      destination = fs.openSync(uri, fs.OpenMode.WRITE_ONLY);
-      AppLog.record('export destination ms=' + (Date.now() - started));
-      const border = this.currentBorder();
-      const framing = this.framingFor(border);
+      const renderStarted = Date.now();
+      attempt.nativeOperation = nativeEngine.beginOperation();
+      print = await this.renderOriginal(params, geometry, attempt);
+      if (!print || attempt.cancelled) return;
+      AppLog.record('export render ms=' + (Date.now() - renderStarted));
       AppLog.record('export border ' + (border.id || 'none'));
-      // A downsampled preview always has a 2048-pixel long edge.
-      let output = Math.max(this.widthPx, this.heightPx) < 2048 ? this.printMap() : undefined;
-      if (!output) {
-        const renderStarted = Date.now();
-        print = await this.renderOriginal(withMaterials ? this.params(this.film, this.paper, this.linear, true) :
-          undefined, framing ? fullPhoto() : this.geometry);
-        AppLog.record('export render ms=' + (Date.now() - renderStarted));
-        if (border.id) {
-          framed = await taskpool.execute(new taskpool.Task(frameExport, print, border, this.borderOverlay,
-            this.borderFilm(this.film), framing), taskpool.Priority.HIGH) as image.PixelMap;
-        }
-        output = framed ?? print;
+      if (border.id) {
+        overlay = await loadBorderOverlay(ctx.resourceManager, border);
+        if (attempt.cancelled) return;
+        framed = await taskpool.execute(new taskpool.Task(frameExport, print, border, overlay,
+          filmName, framing), taskpool.Priority.HIGH) as image.PixelMap;
+        if (attempt.cancelled) return;
       }
-      const temp = ctx.cacheDir + '/print-' + util.generateRandomUUID() + '.' + extension;
+      const output = framed ?? print;
+      const expected = output.getImageInfoSync().size;
+      temp = ctx.cacheDir + '/print-' + util.generateRandomUUID() + '.' + extension;
       const file = fs.openSync(temp, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE);
       try {
         const encodeStarted = Date.now();
         const packer = image.createImagePacker();
         try { await packer.packToFile(output, file.fd, {format: mime, quality: 95}); }
         finally { await packer.release(); }
+        if (attempt.cancelled) return;
         AppLog.record('export encode ms=' + (Date.now() - encodeStarted));
         const bytes = fs.statSync(file.fd).size;
         if (!bytes) throw new Error('图片编码结果为空');
         const encoded = image.createImageSource(temp);
         try {
           const info = await encoded.getImageInfo();
-          const expected = output.getImageInfoSync().size;
           const sameFormat = info.mimeType === mime ||
             (['image/heic', 'image/heif'].includes(mime) && ['image/heic', 'image/heif'].includes(info.mimeType));
           if (!sameFormat || info.size.width !== expected.width || info.size.height !== expected.height) {
@@ -949,30 +1180,33 @@ struct Index {
           }
           AppLog.record('export verified ' + info.mimeType + ' ' + info.size.width + 'x' + info.size.height);
         } finally { await encoded.release(); }
-        const header = new ArrayBuffer(Math.min(bytes, 24));
-        fs.readSync(file.fd, header, {offset: 0});
-        AppLog.record('export encoded ' + mime + ' bytes=' + bytes + ' header=' +
-          Array.from(new Uint8Array(header)).map((value: number) => value.toString(16).padStart(2, '0')).join(''));
-        const writeStarted = Date.now();
-        await fs.copyFile(temp, destination.fd);
-        if (fs.statSync(destination.fd).size !== bytes) throw new Error('照片写入不完整');
-        AppLog.record('export write ms=' + (Date.now() - writeStarted));
-      } finally {
-        fs.closeSync(file);
-        fs.unlinkSync(temp);
-      }
+      } finally { fs.closeSync(file); }
+
+      const savedName = await this.publishExport(ctx, attempt, temp, extension, title);
+      if (savedName === undefined) return;
       this.dirty = false; this.message = '已保存到相册';
-      const size = output.getImageInfoSync().size;
-      AppLog.record('export complete ' + mime + ' ' + size.width + 'x' + size.height);
+      AppReviewService.recordExport(ctx);
+      AppLog.record('export complete ' + mime + ' ' + expected.width + 'x' + expected.height);
       AppLog.record('export filename ' + savedName);
       AppLog.record('export total ms=' + (Date.now() - started));
     } catch (err) {
-      this.message = '保存失败，请重试';
-      AppLog.failure('export', err as BusinessError); console.error('SpektraLab export: ' + String(err));
+      if (!attempt.cancelled && this.exportAttempt === attempt) {
+        this.message = '保存失败，请重试';
+        AppLog.failure('export', err as BusinessError); console.error('SpektraLab export: ' + String(err));
+      }
     } finally {
-      if (destination) fs.closeSync(destination);
-      framed?.release(); print?.release();
-      this.busy = false;
+      nativeEngine.endOperation(attempt.nativeOperation);
+      if (this.exportAttempt === attempt) {
+        attempt.resolveConfirmation(false);
+        this.exportAttempt = undefined;
+        this.stopSaveDialog.close();
+        this.busy = false;
+        this.saveHelpOpen = false;
+      }
+      if (temp) {
+        try { fs.unlinkSync(temp); } catch (err) { AppLog.failure('export cleanup', err as BusinessError); }
+      }
+      framed?.release(); print?.release(); overlay?.release();
       if (!this.editorActive) this.releaseNativeResources();
     }
   }
@@ -1013,8 +1247,11 @@ struct Index {
           .padding({left: 8, right: 8})
           .fontSize(13).fontColor(this.hasGeometry() || this.framingFor(this.currentBorder()) ? '#FFDA9E' : '#F2ECE5')
           .backgroundColor('#AD252425').accessibilityText(this.canAdjustFraming() ? '调整边框取景' : '裁切与旋转')
-          .enabled(!this.busy && !this.rendering && !this.borderLoading)
+          .enabled(!this.busy)
           .onClick(() => {
+            this.stopPreview(true);
+            this.borderRequest++;
+            this.borderLoading = false;
             this.compare = false;
             if (this.canAdjustFraming()) this.framingOpen = true;
             else this.cropOpen = true;
@@ -1033,7 +1270,7 @@ struct Index {
   private hasMaterials(): boolean { return this.film.length > 0 && this.paper.length > 0; }
 
   private clearMaterials(): void {
-    this.version++;
+    this.stopPreview(false);
     this.film = ''; this.paper = ''; this.lastColorPaper = DEFAULT_PAPER;
     this.values = [0, 1, 1, 1];
     const preview = this.preview, cropped = this.croppedPreview;
@@ -1076,9 +1313,9 @@ struct Index {
   }
 
   @Builder
-  cover(stock: Stock) {
+  cover(stock: Stock, fit: ImageFit = ImageFit.Cover) {
     if (stock.id) {
-      Image($rawfile('materials/' + stock.id + '.webp')).objectFit(ImageFit.Cover)
+      Image($rawfile('materials/' + stock.id + '.webp')).objectFit(fit)
         .width('100%').height('100%').draggable(false).accessibilityLevel('no')
     } else {
       Text('—').fontSize(24).fontColor('#85827F').textAlign(TextAlign.Center)
@@ -1138,7 +1375,7 @@ struct Index {
       Text('长按拖动可调整顺序').fontSize(13).fontColor('#EFCD97').width('100%')
         .padding({left: 8, right: 8, bottom: 8})
     }
-    List({space: 8}) {
+    List({space: 8, scroller: full ? undefined : this.materialStripScroller}) {
       ListItem() {
         if (full) {
           this.materialRow(this.tab === 1 ? this.papers[0] : this.films[0], false)
@@ -1157,36 +1394,37 @@ struct Index {
       .layoutWeight(full ? 1 : 0)
       .height(full ? '100%' : 102).width('100%').scrollBar(BarState.Off)
       .onAreaChange((_a, area) => { this.cardWidth = Math.max(84, (Number(area.width) - 16) / 3); })
-    if (!full) {
-      if (this.filmProfile(this.film).reversal) {
-        Text('反转片直扫').fontSize(15).fontColor('#E6E0D9')
-          .width('100%').padding(12).margin({top: 8}).backgroundColor('#292829').borderRadius(CORNER_RADIUS)
-      } else {
-        Text(this.tab === 0 ? '相纸' : '胶片').width('100%').fontSize(12).fontColor('#C3BDB6').margin({top: 8, bottom: 5})
-      ForEach((this.tab === 0 ? this.papers : this.films).filter((s: Stock) => this.selected(s)), (stock: Stock) => {
-        this.materialRow(stock, true)
-      }, (s: Stock) => s.id)
-      }
-      this.quickGrain()
-    }
   }
 
   @Builder
-  quickGrain() {
-    Row() {
-      Text('颗粒').fontSize(12).fontColor('#C3BDB6')
-      Blank()
-      Text(this.values[1].toFixed(1) + ' ×').fontSize(12).fontColor('#D6CFC6')
-    }.width('100%').margin({top: 10})
-    this.adjustmentSlider(1, true)
+  compactMaterials() {
+    Stack({alignContent: Alignment.TopStart}) {
+      Column() {
+        this.materials(false)
+        if (this.filmProfile(this.film).reversal) {
+          Text('反转片直扫').fontSize(15).fontColor('#E6E0D9')
+            .width('100%').padding(12).margin({top: 8}).backgroundColor('#292829').borderRadius(CORNER_RADIUS)
+        } else {
+          Text(this.tab === 0 ? '相纸' : '胶片').width('100%').fontSize(12).fontColor('#C3BDB6')
+            .margin({top: 8, bottom: 5})
+          ForEach((this.tab === 0 ? this.papers : this.films).filter((s: Stock) => this.selected(s)), (stock: Stock) => {
+            this.materialRow(stock, true)
+          }, (s: Stock) => s.id)
+        }
+      }.width('100%').opacity(this.fanVisible ? 0 : 1)
+        .hitTestBehavior(this.fanVisible ? HitTestMode.None : HitTestMode.Default)
+        .accessibilityLevel(this.fanVisible ? 'no-hide-descendants' : 'auto')
+      if (this.fanVisible) { this.materialFan() }
+    }.width('100%').onAreaChange((_old: Area, area: Area) => { this.fanHeight = Number(area.height); })
+    Column() { this.materialPager(48) }.width('100%').margin({top: 10})
   }
 
   @Builder
-  adjustmentSlider(index: number, compact: boolean = false) {
+  adjustmentSlider(index: number) {
     Slider({value: this.values[index], min: index === 0 ? -this.limits[0] : 0,
       max: this.limits[index], step: 0.1, style: SliderStyle.InSet})
-      .width('100%').height(compact ? 34 : 44).trackThickness(compact ? 16 : 24)
-      .blockSize({width: compact ? 12 : 18, height: compact ? 12 : 18})
+      .width('100%').height(44).trackThickness(24)
+      .blockSize({width: 18, height: 18})
       .selectedColor('#DCAF70').trackColor('#393638').blockColor('#FFF2DC')
       .blockBorderColor('#E7CDA7').blockBorderWidth(1)
       .sliderInteractionMode(SliderInteraction.SLIDE_ONLY)
@@ -1233,11 +1471,16 @@ struct Index {
       getFraming: () => this.framingFor(border), getFilm: () => this.borderFilm(this.goodFilm),
       sourceRevision: this.borderSourceRevision, selected: this.borderId === border.id,
       cardWidth: grid ? Math.max(60, (this.borderListWidth - 16) / 3) : this.borderStripWidth(),
+      compact: !grid,
       onSelect: () => this.chooseBorder(border)
     })
   }
 
-  private borderStripWidth(): number { return Math.max(62, (this.borderListWidth - 25) / 3.2); }
+  private borderStripWidth(): number { return Math.max(64, (this.borderListWidth - 24) / 2.65); }
+
+  private borderStripStart(): number {
+    return Math.max(0, this.borderOrder.indexOf(this.borderId));
+  }
 
   private moveBorder(from: number, to: number): void {
     const next = moveVisibleMaterial(this.borderOrder, this.borderOrder, from, to);
@@ -1248,7 +1491,8 @@ struct Index {
 
   @Builder
   borderList(grid: boolean) {
-    List({space: 8}) {
+    List({space: grid ? 8 : 12, initialIndex: grid ? 0 : this.borderStripStart(),
+      scroller: grid ? undefined : this.borderStripScroller}) {
       ListItem() { this.borderCard(NO_FRAME, grid) }
       ForEach(this.borderOrder.map((id: string) => this.borders.find((border: FrameBorder) => border.id === id)!),
         (border: FrameBorder) => {
@@ -1259,32 +1503,162 @@ struct Index {
       .listDirection(grid ? Axis.Vertical : Axis.Horizontal)
       .lanes(grid ? 3 : 1, grid ? 8 : 0)
       .width('100%').layoutWeight(grid ? 1 : 0)
-      .height(grid ? '100%' : Math.round(this.borderStripWidth() * 0.74) + 59)
+      .height(grid ? '100%' : Math.min(Math.round(this.borderStripWidth()), this.compactHeight() - 150) + 43)
       .scrollBar(grid ? BarState.Auto : BarState.Off)
   }
 
   @Builder
-  borderPicker(allowToggle: boolean) {
-    Column({space: 4}) {
-      Row({space: 8}) {
-        Text('选择边框').fontSize(13).fontWeight(FontWeight.Medium).fontColor('#F2ECE5').layoutWeight(1)
-        if (allowToggle) {
-          Button(this.panel === 2 ? '收起列表' : '查看全部', {type: ButtonType.Normal}).id('border-browse')
-            .fontColor('#EFCD97').fontSize(12).height(30).padding({left: 10, right: 2})
-            .backgroundColor(Color.Transparent).onClick(() => this.snapPanel(this.panel === 2 ? 1 : 2))
-        }
-      }.width('100%')
-      if (!allowToggle || this.panel === 2) {
+  borderPicker(forceGrid: boolean) {
+    Column({space: 8}) {
+      if (forceGrid || this.panel === 2) {
+        this.borderName()
         if (this.showBorderOrderHint) {
           Text('长按拖动可调整顺序').fontSize(13).fontColor('#EFCD97').width('100%')
             .padding({left: 8, right: 8, bottom: 4})
         }
         this.borderList(true)
       } else {
-        this.borderList(false)
+        Stack({alignContent: Alignment.TopStart}) {
+          Column({space: 8}) {
+            this.borderName()
+            this.borderList(false)
+          }.width('100%').opacity(this.fanVisible ? 0 : 1)
+            .hitTestBehavior(this.fanVisible ? HitTestMode.None : HitTestMode.Default)
+            .accessibilityLevel(this.fanVisible ? 'no-hide-descendants' : 'auto')
+          if (this.fanVisible) { this.materialFan() }
+        }.width('100%').onAreaChange((_old: Area, area: Area) => { this.fanHeight = Number(area.height); })
+        this.materialPager(36)
       }
     }.width('100%').layoutWeight(1).alignItems(HorizontalAlign.Start)
       .onAreaChange((_old, area) => { this.borderListWidth = Number(area.width); })
+  }
+
+  @Builder
+  borderName() {
+    Text(this.currentBorder().name).id('border-current-name').fontSize(15).fontWeight(FontWeight.Bold)
+      .fontColor('#F2ECE5').height(28).maxLines(1).textOverflow({overflow: TextOverflow.Ellipsis}).width('100%')
+  }
+
+  private pickerPages(): MaterialPage[] {
+    if (this.tab === BORDER_TAB) {
+      return [NO_FRAME].concat(this.borderOrder.map((id: string) =>
+        this.borders.find((border: FrameBorder) => border.id === id)!)).map((border: FrameBorder): MaterialPage => {
+        return {id: border.id, name: border.name, border: border};
+      });
+    }
+    const stocks = this.orderedStocks();
+    const pages = this.tab === 1 && stocks.length === 1 ? stocks :
+      [this.tab === 1 ? this.papers[0] : this.films[0]].concat(stocks);
+    return pages
+      .map((stock: Stock): MaterialPage => {
+        return {id: stock.id, name: this.shortName(stock), stock: stock};
+      });
+  }
+
+  private pagerIndex(): number {
+    const id = this.tab === BORDER_TAB ? this.borderId : this.tab === 1 ? this.paper : this.film;
+    return Math.max(0, this.pickerPages().findIndex((option: MaterialPage) => option.id === id));
+  }
+
+  private pagerReady(): boolean {
+    return !this.busy && this.panel === 1;
+  }
+
+  private previewPager(position: number): void {
+    this.fanPosition = position;
+    if (this.fanVisible) return;
+    this.fanPages = this.pickerPages();
+    this.getUIContext().animateTo({duration: 180, curve: Curve.EaseOut}, () => { this.fanVisible = true; });
+  }
+
+  private hideFan(): void {
+    if (!this.fanVisible) return;
+    this.getUIContext().animateTo({duration: 190, curve: Curve.EaseOut}, () => { this.fanVisible = false; });
+  }
+
+  private async commitPager(index: number): Promise<void> {
+    const tab = this.tab;
+    const option = (this.fanVisible ? this.fanPages : this.pickerPages())[index];
+    if (this.fanVisible) this.fanPosition = index;
+    this.hideFan();
+    if (!option || !this.pagerReady()) return;
+    if (option.border) {
+      await this.chooseBorder(option.border);
+      if (this.tab === tab && this.panel === 1 && this.borderId === option.id) {
+        this.borderStripScroller.scrollToIndex(index, true, ScrollAlign.CENTER);
+      }
+    } else if (option.stock) {
+      this.pick(option.stock);
+      this.materialStripScroller.scrollToIndex(index, true, ScrollAlign.CENTER);
+    }
+    AppLog.record('material pager committed tab=' + tab + ' index=' + index + ' id=' + (option.id || 'none'));
+  }
+
+  @Builder
+  materialPager(height: number) {
+    MaterialPager({
+      count: this.pickerPages().length, index: this.pagerIndex(),
+      label: this.pickerPages()[this.fanVisible ? Math.round(this.fanPosition) : this.pagerIndex()]?.name ?? '',
+      available: this.pagerReady(), rowHeight: height,
+      onPreview: (position: number) => this.previewPager(position),
+      onCommit: (index: number) => { this.commitPager(index); },
+      onCancel: () => this.hideFan()
+    })
+  }
+
+  private visibleFanPages(): MaterialPage[] {
+    const first = Math.max(0, Math.floor(this.fanPosition) - 3);
+    const last = Math.min(this.fanPages.length, Math.ceil(this.fanPosition) + 4);
+    return this.fanPages.slice(first, last);
+  }
+
+  private fanPlacement(option: MaterialPage): FanPlacement {
+    const index = this.fanPages.findIndex((page: MaterialPage) => page.id === option.id);
+    return materialFanPlacement(index - this.fanPosition,
+      Math.min(73, (this.windowWidth - 24) * 0.185, this.fanHeight * 0.34), index === Math.round(this.fanPosition));
+  }
+
+  @Builder
+  fanCard(option: MaterialPage) {
+    Stack({alignContent: Alignment.TopStart}) {
+      Image($rawfile('material-pager/carrier.webp')).width('100%').height('100%').objectFit(ImageFit.Fill)
+        .draggable(false)
+      Stack() {
+        if (option.border) {
+          FrameBorderCard({
+            preset: option.border, previewOnly: true, sourceRevision: this.borderSourceRevision,
+            getSource: () => this.framingFor(option.border!) ? this.preview ?? this.original : this.borderBase(),
+            getFraming: () => this.framingFor(option.border!), getFilm: () => this.borderFilm(this.goodFilm)
+          })
+        } else if (option.stock) {
+          this.cover(option.stock, ImageFit.Contain)
+        }
+      }.width('87.4%').height('69.6%').position({x: '6.3%', y: '9.5%'}).backgroundColor('#141313')
+        .borderRadius(2).clip(true)
+      Text(option.name).width('84%').height('14%').position({x: '8%', y: '82%'})
+        .fontColor(this.fanPlacement(option).order >= 1000 ? '#FFDC9D' : '#E0CEC0')
+        .fontSize(11).maxLines(2).textOverflow({overflow: TextOverflow.Ellipsis}).textAlign(TextAlign.Center)
+    }.id('material-fan-card-' + (option.id || 'none'))
+      .width(Math.min(154, (this.windowWidth - 24) * 0.39, this.fanHeight * 0.66)).aspectRatio(0.79)
+      .opacity(this.fanPlacement(option).opacity).blur(this.fanPlacement(option).blur)
+      .zIndex(this.fanPlacement(option).order)
+      .scale({x: this.fanPlacement(option).scale, y: this.fanPlacement(option).scale})
+      .rotate({angle: this.fanPlacement(option).angle})
+      .translate({x: this.fanPlacement(option).x, y: this.fanPlacement(option).y - 6})
+      .animation({duration: 105, curve: Curve.EaseOut})
+  }
+
+  @Builder
+  materialFan() {
+    Stack({alignContent: Alignment.Center}) {
+      ForEach(this.visibleFanPages(), (option: MaterialPage) => { this.fanCard(option) },
+        (option: MaterialPage) => option.id)
+      Text((Math.round(this.fanPosition) + 1) + ' / ' + this.fanPages.length)
+        .width('100%').height(15).align(Alignment.Center).textAlign(TextAlign.Center)
+        .fontColor('#CAB8A8').fontSize(10).position({x: 0, y: Math.max(0, this.fanHeight - 15)}).zIndex(2000)
+    }.width('100%').height(this.fanHeight).position({x: 0, y: 0}).id('material-fan')
+      .clip(true).hitTestBehavior(HitTestMode.None).accessibilityLevel('no-hide-descendants')
+      .transition(TransitionEffect.OPACITY.combine(TransitionEffect.translate({y: 12})))
   }
 
   @Builder
@@ -1334,13 +1708,13 @@ struct Index {
       if (this.panelPosition > 0.02 || this.panel !== 0) {
         this.materialTabs()
         if (this.tab === BORDER_TAB) {
-          this.borderPicker(true)
+          this.borderPicker(false)
         } else if (this.tab === ADJUST_TAB) {
           Scroll() { Column() { this.adjustments() }.width('100%') }
             .layoutWeight(1).width('100%').align(Alignment.Top)
         } else {
           Stack({alignContent: Alignment.TopStart}) {
-            Column() { this.materials(false) }
+            Column() { this.compactMaterials() }
               .width('100%').height('100%').opacity(1 - this.libraryProgress())
               .hitTestBehavior(this.libraryProgress() < 0.5 ? HitTestMode.Default : HitTestMode.BLOCK_DESCENDANTS)
               .accessibilityLevel(this.libraryProgress() < 0.5 ? 'auto' : 'no-hide-descendants')
@@ -1362,7 +1736,7 @@ struct Index {
     Column() {
       this.materialTabs()
       if (this.tab === BORDER_TAB) {
-        this.borderPicker(false)
+        this.borderPicker(true)
       } else if (this.tab === ADJUST_TAB) {
         Scroll() { Column() { this.adjustments() }.width('100%') }
           .layoutWeight(1).width('100%').align(Alignment.Top)
@@ -1377,13 +1751,17 @@ struct Index {
   importMenu() {
     Menu() {
       MenuItem({content: '从相册选择'}).contentFontColor('#F2ECE5')
-        .enabled(!this.busy && !this.rendering && !!this.assets)
+        .enabled((!this.busy || this.importing) && !!this.assets)
         .onClick(() => { this.choosePhoto(); })
       MenuItem({content: '从文件选择'}).contentFontColor('#F2ECE5')
-        .enabled(!this.busy && !this.rendering && !!this.assets)
+        .enabled((!this.busy || this.importing) && !!this.assets)
         .onClick(() => { this.chooseFile(); })
-      MenuItem({content: '设置'}).contentFontColor('#F2ECE5')
-        .onClick(() => { this.getUIContext().getRouter().pushUrl({url: 'pages/Settings'}); })
+      MenuItem({content: '设置'}).contentFontColor('#F2ECE5').enabled(!this.busy || this.importing)
+        .onClick(() => {
+          this.stopImport();
+          this.stopPreview(true);
+          this.getUIContext().getRouter().pushUrl({url: 'pages/Settings'});
+        })
     }.backgroundColor('#292829').radius(CORNER_RADIUS)
       .border({width: 0.5, color: '#50473F', radius: CORNER_RADIUS})
   }
@@ -1433,9 +1811,12 @@ struct Index {
           SaveButton({icon: SaveIconStyle.LINES, text: SaveDescription.SAVE, buttonType: ButtonType.Normal})
             .width(78).height(34).borderRadius(CORNER_RADIUS).backgroundColor('#EFBD70')
             .iconSize(16).iconColor('#32271D').fontSize(14).fontColor('#32271D').textIconSpace(6)
-            .enabled(this.canSave())
+            .enabled(this.canSave() || this.waitingForSaveGrant)
             .onClick((_event: ClickEvent, result: SaveButtonOnClickResult) => {
-              if (result === SaveButtonOnClickResult.SUCCESS) this.save();
+              if (result === SaveButtonOnClickResult.SUCCESS) {
+                if (this.waitingForSaveGrant) this.resumeSaveAuthorization();
+                else this.save();
+              }
               else if (result === SaveButtonOnClickResult.TEMPORARY_AUTHORIZATION_FAILED) this.message = '保存授权失败，请重试';
             })
         } else { Blank().width(78) }
@@ -1475,7 +1856,9 @@ struct Index {
         }
       }.width('100%').layoutWeight(1)
       }
-    }.width('100%').height('100%').onAreaChange((_a, b) => {
+    }.width('100%').height('100%').onTouch((event: TouchEvent) => {
+      if (event.type === TouchType.Down) this.cancelReviewPrompt();
+    }).onAreaChange((_a, b) => {
         this.windowHeight = Number(b.height);
         this.windowWidth = Number(b.width) - this.getUIContext().px2vp(this.leftInset + this.rightInset);
         this.updateMaterialOrderHint();
