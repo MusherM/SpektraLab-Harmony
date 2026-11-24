@@ -1,0 +1,102 @@
+{
+  "version": "1.9.0",
+  "version_code": 14,
+  "previous": "1.8.0",
+  "repository": "MusherM/SpektraLab-Harmony",
+  "source": "c6b284996ca6604fbf2845cff5c1161f3e5b4e05",
+  "date": "2026-11-24 15:48",
+  "app": {
+    "profile_type": "release",
+    "distribution": "app_gallery",
+    "signature": "verified"
+  },
+  "changes": [
+    "- **多格边框取景**：拼接边框也可拖动和缩放取景，多个开口共享取景中心和缩放，保存沿用同一构图。",
+    "- **边框栏排版**：收起时与其他选项卡等高，横向浏览当前及相邻边框的缩略图与名称。",
+    "- **分页拖动选款**：胶片、相纸和边框可通过分页指示器选款。按住展开细轨道，横拖显示扇形卡片，松手应用所选款式。",
+    "- **中断导入、冲印与保存**：导入、冲印和检查更新可中断。保存完成前可请求取消，确认后停止；替换照片前会确认未保存的调整。",
+    "- **应用内评分与评论**：在至少两天内累计成功保存三张照片后，回首页时可能显示华为应用市场弹窗。每版最多尝试一次，间隔至少 30 天；确认已评价后在本机停止邀请。",
+    "- **设置与反馈**：连续切换输出格式时保留最后一次选择。反馈入口移到设置页底部，准备邮件时可以取消。"
+  ],
+  "checks": [
+    "直板机与 HOP 展开态均覆盖安装并启动 1.9.0（14）。",
+    "两台设备均验证 RAW 导入取消、冲印取消、保存确认取消后保留原有编辑，并再次保存成功。",
+    "两台设备均从本地测试进度完成一次实际保存后回首页，显示华为官方评分框。星级保持为空，测试后恢复本地评分进度。",
+    "本机自动回归、公开 GitHub 回归及签名 APP 绑定的五组 RAW 方向验收通过。",
+    "调试 HAP、release 未签名 HAP 与发行 APP 含全部 41 款边框所需资源。37 张原边框图层的校验值与 1.8.0 一致。",
+    "发行 APP 内的 ArkTS 字节码和原生库与 release 未签名 HAP 一致。发行 APP 验签通过，profile 类型为 release，渠道为 app_gallery。",
+    "AppGallery 鉴权、应用匹配、上传权限和本次发行材料的校验通过。",
+    "双机截图记录检查更新结果；直板机界面树捕获到取消检查按钮。",
+    "反馈截图覆盖入口和表单；取消邮件准备通过代码路径复核。"
+  ],
+  "raw_orientation": [
+    {
+      "id": "canon-cr2",
+      "rotation": 0,
+      "score": 0.98712
+    },
+    {
+      "id": "nikon-nef",
+      "rotation": 0,
+      "score": 0.994309
+    },
+    {
+      "id": "sony-arw",
+      "rotation": 0,
+      "score": 0.991985
+    },
+    {
+      "id": "fuji-raf",
+      "rotation": 0,
+      "score": 0.912038
+    },
+    {
+      "id": "huawei-dng",
+      "rotation": 90,
+      "score": 0.965726
+    }
+  ],
+  "digests": {
+    "release 未签名 HAP": "431b71cd5764ea4b097447feb635c33098c640de6b4c44b2838f9d1d178adc1c",
+    "发行签名 APP": "d71c11f5c0e8e9bf737605dcfff28b5eace6bc1c869446e990beb95878eadf30",
+    "中文更新日志": "e94a1e5c69d4523f4aebffb91a7054a9c7dee3dff1b4bf7e618558d3b82ef70c",
+    "完整材料清单": "b3b369f00fe01f1483f339b7cdcc5b3154f7fd9d66f9dff8bc0d53db7b1472e4",
+    "RAW 方向验收记录": "f7b7c4c819c8e6e6244dc91ba3c29bd548aa5dc95f30fce12d336114b438e9f1",
+    "边框资源清单": "80d498bef7d7d9edad1bd4eadb7d780bcd2b9f4bb38aaf5b62b512d8eafe11d7"
+  },
+  "screenshots": {
+    "evidence/1.9.0/bar-multi-frame.jpg": "290ba01a4fddad60c0bb612dd027b3e9ab61e3207669775949285f46858dc7b5",
+    "evidence/1.9.0/bar-compact-border.jpg": "2ec65981e5219bf60fdaff364f65b3bd01b81d1b6e4c3c89dc78d5113ed6852b",
+    "evidence/1.9.0/bar-pager-hold.jpg": "46a44726bf237a78aaec2923d990e27a13d6e4e1cc7fa53c694dd0fe1cfa926e",
+    "evidence/1.9.0/bar-pager-border.jpg": "f0fd55651f0de8b0af419b3305c32f5af80063a4f08d54c851529bc6d699ee86",
+    "evidence/1.9.0/bar-pager-film.jpg": "4675bf423063fecadf65e219a3d54d86a1a91b6c567a1c733ef41df8db66d63c",
+    "evidence/1.9.0/bar-pager-paper.jpg": "e97fcc71e718c12d325e395fdea66b4069a70eb357b25060ecf5627c16cf4da4",
+    "evidence/1.9.0/bar-pager-paper-single.jpg": "10159aa218624b2c8266c0f3fde242b0a444f5faefe4eefe93f11fe225f2736d",
+    "evidence/1.9.0/bar-replace-photo.jpg": "3b8cf37848f6cbd20bf1cf6b625571e0f0a089e781d8fdf430bc8d1240bb26e6",
+    "evidence/1.9.0/bar-cancel-import-start.jpg": "5757d5995549f69bf5e4e2b329170815bbca754f1be7e9ddc6b4abd2d67193ea",
+    "evidence/1.9.0/bar-cancel-import-result.jpg": "30e7e3c26e9612c95505d6c79ada319ebd1062ae266175ae6aa00506eeee3d8c",
+    "evidence/1.9.0/bar-cancel-render-start.jpg": "413d90564b6cf2e121a76b1268f0846087de77fe37e8703cbea6c50289c16de7",
+    "evidence/1.9.0/bar-cancel-render-result.jpg": "dc2f8ecc7f6e582f4b8f26714033dcf4fc68f222ae2b4d952e70f4b4f9b109e4",
+    "evidence/1.9.0/bar-cancel-save-confirm.jpg": "da9d846eca5e7e44f88719be6307fa937d163bc168d879263e0a060361974c83",
+    "evidence/1.9.0/bar-cancel-save-result.jpg": "0fe63f8ffb7a9c79a3fdc0c2c932a08807e449f24c19c63b0f0b1d760f8f18f5",
+    "evidence/1.9.0/bar-save-resumed.jpg": "979444b21c075a4b02abca254fc6cab4b7ddd42ef4fd11fe55fcb828e362a190",
+    "evidence/1.9.0/bar-review-dialog.jpg": "1be38f37e0d54983d4eb2adaed70b4d17a5a6949fa8496f51316fab976410913",
+    "evidence/1.9.0/bar-output-formats.jpg": "b7a1e7cc3584e632a8536addc6cd4b05eb50a7e030a7360f3348ec5f2affd7be",
+    "evidence/1.9.0/bar-update-check.jpg": "96b515c234bc2f1dc121baee3680b9df965af778cf65223693cba4811a87040f",
+    "evidence/1.9.0/bar-feedback.jpg": "a2950e83684a3c4725b3747600df724ad74e47c63b3ffc9e7afb90147e2097ab",
+    "evidence/1.9.0/hop-multi-frame.jpg": "2bf552aaee19dc965c4e3a919d36b6888f7408353af504929a0cae8b45efacaa",
+    "evidence/1.9.0/hop-replace-photo.jpg": "c24e39188ccc3499c44cd4fd2d27311b3e656ba17f19eeb8e14c459174589250",
+    "evidence/1.9.0/hop-cancel-import-start.jpg": "edd80206ce69de87cb194a2f7d1c53a929cf0b850ea5118f29ecc07f17ee6e20",
+    "evidence/1.9.0/hop-cancel-import-result.jpg": "fb3006d60f162444a5708e54ecf60c99384bb0997239bd35756e44cf988a6b96",
+    "evidence/1.9.0/hop-cancel-render-start.jpg": "5d6590433df3bbf791aed47580b2b0d038ae463dec4693193dc82d5eced6349f",
+    "evidence/1.9.0/hop-cancel-render-result.jpg": "7e634d8d7fedab05a97cd35cbecebcba67e4fbbba0f7fb2946704ab514828d08",
+    "evidence/1.9.0/hop-cancel-save-confirm.jpg": "482b9796eadf9d65275779a0ffb3b5723d7ff2f128590ab2913b1788db6246b1",
+    "evidence/1.9.0/hop-cancel-save-result.jpg": "7e634d8d7fedab05a97cd35cbecebcba67e4fbbba0f7fb2946704ab514828d08",
+    "evidence/1.9.0/hop-save-resumed.jpg": "2c0556ba408430ceec166cff69e23a0428e284ac4db1e8defc4cb949fd74d80a",
+    "evidence/1.9.0/hop-review-dialog.jpg": "e93e9ac83451d9aa308fde454a0004859cd48108a5b0019b66e9d9ff1276eb29",
+    "evidence/1.9.0/hop-output-formats.jpg": "3578f8b50be3a310d694090185675f6308d6cb89d87e3d25ec1514d563b82d67",
+    "evidence/1.9.0/hop-update-check.jpg": "f53d4d7ed65895f3704685c51e7d98712500b712ade727b8b982478667218c25",
+    "evidence/1.9.0/hop-feedback.jpg": "c503e8c61922d4ce83bc0ffb64fb4060e53ee4233001c9dcd60617c033560bff"
+  },
+  "store_notes": "多格边框取景。拼接边框也可拖动和缩放取景，多个开口共享取景中心和缩放，保存沿用同一构图。\n边框栏排版。收起时与其他选项卡等高，横向浏览当前及相邻边框的缩略图与名称。\n分页拖动选款。胶片、相纸和边框可通过分页指示器选款。按住展开细轨道，横拖显示扇形卡片，松手应用所选款式。\n中断导入、冲印与保存。导入、冲印和检查更新可中断。保存完成前可请求取消，确认后停止；替换照片前会确认未保存的调整。\n应用内评分与评论。在至少两天内累计成功保存三张照片后，回首页时可能显示华为应用市场弹窗。每版最多尝试一次，间隔至少 30 天；确认已评价后在本机停止邀请。\n设置与反馈。连续切换输出格式时保留最后一次选择。反馈入口移到设置页底部，准备邮件时可以取消。"
+}
