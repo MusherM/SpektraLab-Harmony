@@ -1,0 +1,46 @@
+#version 450
+
+// Bit-exact 16x16 tiled shared-memory transpose for 3-channel float32 planes:
+// input (H, W, 3) -> output (W, H, 3).
+// Dispatched as 1D workgroups of 256 threads: n_threads = tiles_x * tiles_y * 256.
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0, std430) readonly buffer Input { float value[]; } src;
+layout(set = 0, binding = 1, std430) readonly buffer Meta { uint value[]; } meta;
+layout(set = 0, binding = 2, std430) writeonly buffer Output { float value[]; } dst;
+
+shared float tile_r[16][17];
+shared float tile_g[16][17];
+shared float tile_b[16][17];
+
+void main() {
+    uint H = meta.value[0];
+    uint W = meta.value[1];
+    uint tiles_x = (W + 15u) >> 4u;
+    uint tiles_y = (H + 15u) >> 4u;
+    uint wg_idx = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+    if (wg_idx >= tiles_x * tiles_y) return;
+
+    uint tx = wg_idx % tiles_x;
+    uint ty = wg_idx / tiles_x;
+    uint lx = gl_LocalInvocationID.x & 15u;
+    uint ly = gl_LocalInvocationID.x >> 4u;
+
+    uint x = tx * 16u + lx;
+    uint y = ty * 16u + ly;
+    if (x < W && y < H) {
+        uint idx = (y * W + x) * 3u;
+        tile_r[ly][lx] = src.value[idx];
+        tile_g[ly][lx] = src.value[idx + 1u];
+        tile_b[ly][lx] = src.value[idx + 2u];
+    }
+    barrier();
+
+    uint ox = ty * 16u + lx; // column in transposed (W, H) == original y
+    uint oy = tx * 16u + ly; // row in transposed (W, H) == original x
+    if (ox < H && oy < W) {
+        uint oidx = (oy * H + ox) * 3u;
+        dst.value[oidx]      = tile_r[lx][ly];
+        dst.value[oidx + 1u] = tile_g[lx][ly];
+        dst.value[oidx + 2u] = tile_b[lx][ly];
+    }
+}

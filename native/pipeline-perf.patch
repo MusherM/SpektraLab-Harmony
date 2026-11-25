@@ -1,0 +1,69 @@
+--- a/pipeline.cpp
++++ b/pipeline.cpp
+@@ -1,4 +1,5 @@
+ #include "pipeline.hpp"
++#include "render_quality.hpp"
+ #include "timer.hpp"
+ #include "halation_psf.hpp"
+ #if !defined(__APPLE__) || defined(SPK_VULKAN_BACKEND)
+@@ -2004,6 +2005,60 @@
+ }
+ 
+ bool Pipeline::print_spectral(const Chain& in, Chain& out, std::string& error) {
++    const uint32_t lut_size = harmony_perf::current_render_quality().print_lut_size;
++    if (lut_size >= 17u && lut_size <= 65u && !di_active_ && !params_.io.scan_film && !mask_on_) {
++        // Dynamically evaluate the exact enlarger+exposure+curves+scanner+bw chain on an S^3
++        // CMY density cube on GPU (~15-25 ms) and apply trilinearly while preserving exact
++        // glare, unsharp, gamut compression, and output encoding downstream.
++        const uint32_t S = lut_size;
++        float lo[3] = {-0.1f, -0.1f, -0.1f};
++        float hi[3];
++        float inv_span[3];
++        for (int c = 0; c < 3; ++c) {
++            hi[c] = float(std::max(3.5, params_.film.density_max[c] + 0.5));
++            inv_span[c] = 1.0f / (hi[c] - lo[c]);
++        }
++        const size_t npts = size_t(S) * S * S;
++        std::vector<float> grid(npts * 3u);
++        const float inv_sm1 = 1.0f / float(S - 1u);
++        for (uint32_t i = 0; i < S; ++i) {
++            const float c0 = lo[0] + (hi[0] - lo[0]) * (float(i) * inv_sm1);
++            for (uint32_t j = 0; j < S; ++j) {
++                const float c1 = lo[1] + (hi[1] - lo[1]) * (float(j) * inv_sm1);
++                for (uint32_t k = 0; k < S; ++k) {
++                    const size_t idx = ((size_t(i) * S + j) * S + k) * 3u;
++                    grid[idx]     = c0;
++                    grid[idx + 1] = c1;
++                    grid[idx + 2] = lo[2] + (hi[2] - lo[2]) * (float(k) * inv_sm1);
++                }
++            }
++        }
++        Image cube;
++        cube.h = S; cube.w = S * S; cube.c = 3;
++        cube.buf = gpu_->upload(grid.data(), grid.size() * sizeof(float), error);
++        if (!cube.buf) return false;
++        Image cur = cube, next;
++        SPK_NODE(node_enlarger_spectral(cur, next, error)); cur = next;
++        SPK_NODE(node_print_exposure(cur, next, error)); cur = next;
++        SPK_NODE(node_print_curves(cur, next, error)); cur = next;
++        SPK_NODE(node_scan_spectral(cur, next, error)); cur = next;
++        SPK_NODE(node_bw_correction(cur, next, error)); cur = next;
++
++        gpu::BufferRef lo_buf = gpu_->upload(lo, sizeof lo, error);
++        gpu::BufferRef inv_buf = gpu_->upload(inv_span, sizeof inv_span, error);
++        if (!lo_buf || !inv_buf) return false;
++        Image applied;
++        if (!alloc_like(in.cur, applied, error)) return false;
++        const uint32_t meta[2] = {uint32_t(in.cur.pixels()), S};
++        if (!gpu_->dispatch("spk_lut3d_trilinear",
++                            {gpu::Arg::buf(in.cur.buf), gpu::Arg::buf(cur.buf),
++                             gpu::Arg::buf(lo_buf), gpu::Arg::buf(inv_buf),
++                             gpu::Arg::inline_bytes(meta, 2), gpu::Arg::buf(applied.buf)},
++                            in.cur.pixels(), error)) return false;
++        out = in;
++        out.cur = applied;
++        return true;
++    }
+     Image cur = in.cur, next;
+     // RFC-032 §27 before RFC-028: where there is no film the DI encodes the
+     // hole's density, not the frame's. `node_overscan_light` (the scan's view

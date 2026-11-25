@@ -1,0 +1,48 @@
+#version 450
+// Bilinear upsample from downsampled blur mixture with optional accumulate + active mask.
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0, std430) readonly buffer Coarse { float v[]; } coarse;
+layout(set = 0, binding = 1, std430) readonly buffer Orig { float v[]; } orig;
+layout(set = 0, binding = 2, std430) readonly buffer Acc { float v[]; } acc;
+layout(set = 0, binding = 3, std430) readonly buffer Active { uint v[]; } act;
+layout(set = 0, binding = 4, std430) readonly buffer Weights { float v[]; } weights;
+layout(set = 0, binding = 5, std430) readonly buffer Meta { uint v[]; } meta;
+layout(set = 0, binding = 6, std430) writeonly buffer Out { float v[]; } out_data;
+
+uint spk_global_index() {
+    return gl_GlobalInvocationID.y * (gl_NumWorkGroups.x * gl_WorkGroupSize.x) + gl_GlobalInvocationID.x;
+}
+
+void main() {
+    uint sh = meta.v[0], sw = meta.v[1], oh = meta.v[2], ow = meta.v[3], accumulate = meta.v[4];
+    uint idx = spk_global_index();
+    if (idx >= oh * ow) return;
+    uint oy = idx / ow;
+    uint ox = idx - oy * ow;
+    float fy = (float(oy) + 0.5) * (float(sh) / float(oh)) - 0.5;
+    float fx = (float(ox) + 0.5) * (float(sw) / float(ow)) - 0.5;
+    fy = clamp(fy, 0.0, float(sh - 1u));
+    fx = clamp(fx, 0.0, float(sw - 1u));
+    uint y0 = uint(floor(fy));
+    uint x0 = uint(floor(fx));
+    uint y1 = min(y0 + 1u, sh - 1u);
+    uint x1 = min(x0 + 1u, sw - 1u);
+    float ty = fy - float(y0);
+    float tx = fx - float(x0);
+    uint i00 = (y0 * sw + x0) * 3u;
+    uint i01 = (y0 * sw + x1) * 3u;
+    uint i10 = (y1 * sw + x0) * 3u;
+    uint i11 = (y1 * sw + x1) * 3u;
+    uint o = idx * 3u;
+    for (uint c = 0u; c < 3u; ++c) {
+        float val;
+        if (act.v[c] != 0u) {
+            float top = mix(coarse.v[i00 + c], coarse.v[i01 + c], tx);
+            float bot = mix(coarse.v[i10 + c], coarse.v[i11 + c], tx);
+            val = mix(top, bot, ty);
+        } else {
+            val = orig.v[o + c];
+        }
+        out_data.v[o + c] = (accumulate != 0u) ? (acc.v[o + c] + weights.v[c] * val) : val;
+    }
+}

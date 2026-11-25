@@ -1,0 +1,95 @@
+#version 450
+
+// Fused spectral integral and the three-channel epilogue from nodes.metal.
+// Bit-exact optimization: pack per-wavelength tables into vec4 shared memory
+// and unroll by 4 while preserving exact scalar addition order.
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0, std430) readonly buffer Input { float value[]; } input_data;
+layout(set = 0, binding = 1, std430) readonly buffer Characteristic { float value[]; } characteristic;
+layout(set = 0, binding = 2, std430) readonly buffer Base { float value[]; } base_data;
+layout(set = 0, binding = 3, std430) readonly buffer Integral { float value[]; } integral_data;
+layout(set = 0, binding = 4, std430) readonly buffer Epilogue { float value[]; } epilogue;
+layout(set = 0, binding = 5, std430) readonly buffer Meta { uint value[]; } meta;
+layout(set = 0, binding = 6, std430) writeonly buffer Output { float value[]; } output_data;
+
+uint spk_global_index() {
+    return gl_GlobalInvocationID.y * (gl_NumWorkGroups.x * gl_WorkGroupSize.x) + gl_GlobalInvocationID.x;
+}
+
+shared vec4 s_chd_base[128]; // (chd0, chd1, chd2, base)
+shared vec4 s_ixs[128];      // (ixs0, ixs1, ixs2, 0)
+shared float s_ep[6];
+
+void main() {
+    uint n_lambda = meta.value[1];
+    uint lid = gl_LocalInvocationID.x;
+    bool use_shared = (n_lambda <= 128u);
+    if (use_shared) {
+        if (lid < n_lambda) {
+            uint w3 = 3u * lid;
+            s_chd_base[lid] = vec4(characteristic.value[w3], characteristic.value[w3 + 1u],
+                                   characteristic.value[w3 + 2u], base_data.value[lid]);
+            s_ixs[lid] = vec4(integral_data.value[w3], integral_data.value[w3 + 1u],
+                              integral_data.value[w3 + 2u], 0.0);
+        }
+        if (lid < 6u) s_ep[lid] = epilogue.value[lid];
+        barrier();
+    }
+
+    uint pixel = spk_global_index();
+    if (pixel >= meta.value[0]) return;
+    float c0 = input_data.value[3u * pixel];
+    float c1 = input_data.value[3u * pixel + 1u];
+    float c2 = input_data.value[3u * pixel + 2u];
+    vec3 accumulated = vec3(0.0);
+    if (use_shared) {
+        uint w = 0u;
+        for (; w + 3u < n_lambda; w += 4u) {
+            vec4 b0 = s_chd_base[w];
+            vec4 b1 = s_chd_base[w + 1u];
+            vec4 b2 = s_chd_base[w + 2u];
+            vec4 b3 = s_chd_base[w + 3u];
+            float d0 = c0 * b0.x + c1 * b0.y + c2 * b0.z + b0.w;
+            float d1 = c0 * b1.x + c1 * b1.y + c2 * b1.z + b1.w;
+            float d2 = c0 * b2.x + c1 * b2.y + c2 * b2.z + b2.w;
+            float d3 = c0 * b3.x + c1 * b3.y + c2 * b3.z + b3.w;
+            float t0 = exp2(-d0 * 3.321928094887362);
+            float t1 = exp2(-d1 * 3.321928094887362);
+            float t2 = exp2(-d2 * 3.321928094887362);
+            float t3 = exp2(-d3 * 3.321928094887362);
+            accumulated += t0 * s_ixs[w].xyz;
+            accumulated += t1 * s_ixs[w + 1u].xyz;
+            accumulated += t2 * s_ixs[w + 2u].xyz;
+            accumulated += t3 * s_ixs[w + 3u].xyz;
+        }
+        for (; w < n_lambda; ++w) {
+            vec4 b = s_chd_base[w];
+            float d = c0 * b.x + c1 * b.y + c2 * b.z + b.w;
+            float t = exp2(-d * 3.321928094887362);
+            accumulated += t * s_ixs[w].xyz;
+        }
+        uint log_mode = meta.value[2];
+        for (uint channel = 0u; channel < 3u; ++channel) {
+            float value = max(accumulated[channel] * s_ep[channel] + s_ep[3u + channel], 0.0) + 1e-10;
+            if (log_mode == 0u) value = log(value) * 0.4342944819032518;
+            output_data.value[3u * pixel + channel] = value;
+        }
+    } else {
+        for (uint wavelength = 0u; wavelength < n_lambda; ++wavelength) {
+            float density = c0 * characteristic.value[3u * wavelength]
+                          + c1 * characteristic.value[3u * wavelength + 1u]
+                          + c2 * characteristic.value[3u * wavelength + 2u]
+                          + base_data.value[wavelength];
+            float transmission = exp2(-density * 3.321928094887362);
+            accumulated.x += transmission * integral_data.value[3u * wavelength];
+            accumulated.y += transmission * integral_data.value[3u * wavelength + 1u];
+            accumulated.z += transmission * integral_data.value[3u * wavelength + 2u];
+        }
+        for (uint channel = 0u; channel < 3u; ++channel) {
+            float value = max(accumulated[channel] * epilogue.value[channel]
+                              + epilogue.value[3u + channel], 0.0) + 1e-10;
+            if (meta.value[2] == 0u) value = log(value) * 0.4342944819032518;
+            output_data.value[3u * pixel + channel] = value;
+        }
+    }
+}
