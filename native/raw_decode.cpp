@@ -68,7 +68,10 @@ bool convert_direct_parallel(LibRaw& raw, spk::io::DecodedRaw& out) {
     }
     const int src_w = S.width;
     const int src_h = S.height;
-    if (src_w <= 0 || src_h <= 0) return false;
+    // dcraw_process() leaves S.width/S.height in unrotated imgdata.image storage order
+    // matching S.iwidth/S.iheight (LibRaw swaps dimensions only in get_mem_image_format
+    // and temporarily inside copy_mem_image). Fall back if dimensions ever diverge.
+    if (src_w <= 0 || src_h <= 0 || S.iwidth != src_w || S.iheight != src_h) return false;
     const int out_w = (S.flip & 4) ? src_h : src_w;
     const int out_h = (S.flip & 4) ? src_w : src_h;
     const int64_t soff0 = libraw_flip_index(0, 0, S.flip, src_h, src_w);

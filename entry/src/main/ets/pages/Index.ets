@@ -418,15 +418,15 @@ struct Index {
     return this.films.find((stock: Stock) => stock.id === id)!;
   }
 
-  private params(film: string, paper: string, linear: boolean, fullSize: boolean = false,
-    stripedExport: boolean = false): string {
+  // Native full-resolution exports automatically enable 256-row striping above 26 MP.
+  private params(film: string, paper: string, linear: boolean): string {
     return JSON.stringify({ product_defaults: true, film_stock: film, print_stock: paper, scan_film: this.filmProfile(film).reversal,
       exposure_compensation_ev: this.values[0], grain_active: true, grain_amount: this.values[1],
       halation_active: true, halation_amount: this.values[2], glare_active: true, glare_amount: this.values[3],
       auto_exposure: true, auto_exposure_method: 'balanced',
       input_color_space: linear ? 'ProPhoto RGB' : 'sRGB', input_cctf_decoding: !linear,
       output_color_space: 'sRGB', output_cctf_encoding: true,
-      striped: fullSize && stripedExport, strip_rows: fullSize && stripedExport ? 256 : 0 });
+      striped: false, strip_rows: 0 });
   }
 
   private async pixels(input: ArrayBuffer, w: number, h: number, linear: boolean,
@@ -1220,7 +1220,7 @@ struct Index {
     const filmName = this.borderFilm(this.film);
     const quality = normalizeExportQuality(this.exportQuality);
     const fastExport = isFastExport(quality);
-    const params = this.hasMaterials() ? this.params(this.film, this.paper, this.linear, true) : undefined;
+    const params = this.hasMaterials() ? this.params(this.film, this.paper, this.linear) : undefined;
     AppLog.record('export start quality=' + quality);
     let print: image.PixelMap | undefined;
     let framed: image.PixelMap | undefined;

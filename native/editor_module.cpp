@@ -228,6 +228,30 @@ std::string buildDeltaJson(const std::unordered_map<std::string, std::string>& p
     return delta;
 }
 
+constexpr uint64_t kStripedExportPixelThreshold = 26000000ULL;
+
+std::string applyStripedPolicy(const std::string& params, uint32_t w, uint32_t h) {
+    if (uint64_t(w) * uint64_t(h) <= kStripedExportPixelThreshold) return params;
+    std::unordered_map<std::string, std::string> fields;
+    if (!parseFlatJsonObject(params, fields)) return params;
+    fields["striped"] = "true";
+    fields["strip_rows"] = "256";
+    std::string out = "{";
+    bool first = true;
+    if (auto it = fields.find("product_defaults"); it != fields.end()) {
+        out += "\"product_defaults\":" + it->second;
+        first = false;
+    }
+    for (const auto& [k, v] : fields) {
+        if (k == "product_defaults") continue;
+        if (!first) out += ',';
+        first = false;
+        out += '"'; out += k; out += "\":"; out += v;
+    }
+    out += '}';
+    return out;
+}
+
 std::string readText(napi_env env, napi_value value) {
     size_t size = 0;
     if (napi_get_value_string_utf8(env, value, nullptr, 0, &size) != napi_ok)
@@ -402,10 +426,11 @@ napi_value render(napi_env env, napi_callback_info info) {
 
         // Full-resolution one-shot export: drop preview session first to free GPU memory.
         previewCache.reset();
+        const std::string exportParams = applyStripedPolicy(params, w, h);
         Session session(nullptr, spk_session_release);
         if constexpr (Linear) {
             const spk_image input{static_cast<float*>(raw), w, h, 3};
-            session.reset(spk_open(engine, &input, params.c_str(), nullptr));
+            session.reset(spk_open(engine, &input, exportParams.c_str(), nullptr));
         } else {
             const auto* pixels = static_cast<const uint8_t*>(raw);
             const size_t npx = bytes / 4;
@@ -426,7 +451,7 @@ napi_value render(napi_env env, napi_callback_info info) {
             }
             if (wasCancelled.load()) throw Cancelled();
             const spk_image input{rgb.data(), w, h, 3};
-            session.reset(spk_open(engine, &input, params.c_str(), nullptr));
+            session.reset(spk_open(engine, &input, exportParams.c_str(), nullptr));
         }
         return finishRender(env, engine, session.get(), w, h, operation, /*useReprint=*/false);
     } catch (const Cancelled& error) {
@@ -629,9 +654,10 @@ napi_value renderRaw(napi_env env, napi_callback_info info) {
             Session session(nullptr, spk_session_release);
             const uint32_t width = raw->width;
             const uint32_t height = raw->height;
+            const std::string exportParams = applyStripedPolicy(params, width, height);
             {
                 const spk_image input{raw->rgb.data(), width, height, 3};
-                session.reset(spk_open(engine, &input, params.c_str(), nullptr));
+                session.reset(spk_open(engine, &input, exportParams.c_str(), nullptr));
             }
             raw.reset();
             napi_value result{}, w{}, h{};
