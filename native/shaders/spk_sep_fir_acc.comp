@@ -1,0 +1,134 @@
+#version 450
+
+// Bit-exact separable three-channel FIR optimized for mobile GPUs:
+// - Packs per-tap weights into shared vec4 for single-instruction loads
+// - Hoists axis and interior bounds checks outside the tap loop so 99%+ of
+//   pixels skip reflect_index/mirror_index integer modulo completely
+// - Preserves exact tap evaluation and float accumulation order.
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0, std430) readonly buffer Input { float value[]; } image_data;
+layout(set = 0, binding = 1, std430) readonly buffer Weights { float value[]; } weights;
+layout(set = 0, binding = 2, std430) readonly buffer Accumulator { float value[]; } accumulator;
+layout(set = 0, binding = 3, std430) readonly buffer MixWeights { float value[]; } mix_weights;
+layout(set = 0, binding = 4, std430) readonly buffer Meta { uint value[]; } meta;
+layout(set = 0, binding = 5, std430) writeonly buffer Output { float value[]; } output_data;
+
+uint spk_global_index() {
+    return gl_GlobalInvocationID.y * (gl_NumWorkGroups.x * gl_WorkGroupSize.x) + gl_GlobalInvocationID.x;
+}
+
+shared vec4 s_w[128]; // (w_r, w_g, w_b, 0) for up to 128 taps
+shared vec4 s_mix;
+
+int reflect_index(int index, int length) {
+    uint folded = index < 0 ? uint(-(index + 1)) : uint(index);
+    uint period = 2u * uint(length);
+    uint j = folded % period;
+    return int(j >= uint(length) ? period - 1u - j : j);
+}
+
+int mirror_index(int index, int length) {
+    if (length <= 1) return 0;
+    uint folded = index < 0 ? uint(-(index + 1)) + 1u : uint(index);
+    uint period = 2u * uint(length - 1);
+    uint j = folded % period;
+    return int(j >= uint(length) ? period - j : j);
+}
+
+void main() {
+    int radius = int(meta.value[2]);
+    uint taps = uint(2 * radius + 1);
+    uint lid = gl_LocalInvocationID.x;
+    bool use_shared = (taps <= 128u);
+    if (use_shared) {
+        if (lid < taps) {
+            s_w[lid] = vec4(weights.value[lid],
+                            weights.value[taps + lid],
+                            weights.value[2u * taps + lid],
+                            0.0);
+        }
+        if (lid == 0u) {
+            s_mix = vec4(mix_weights.value[0], mix_weights.value[1], mix_weights.value[2], 0.0);
+        }
+        barrier();
+    }
+
+    uint pixel = spk_global_index();
+    uint height = meta.value[0], width = meta.value[1];
+    if (pixel >= height * width) return;
+    uint axis = meta.value[3], accumulate = meta.value[4], mirror = meta.value[5];
+    uint y = pixel / width, x = pixel - y * width;
+    int length = axis == 0u ? int(height) : int(width);
+    int base = axis == 0u ? int(y) : int(x);
+    vec3 sum = vec3(0.0);
+
+    if (use_shared && base >= radius && base + radius < length) {
+        // Fast interior path: zero boundary modulo, incremental addressing, exact order.
+        uint step = axis == 0u ? (width * 3u) : 3u;
+        uint src = axis == 0u ? (uint(base - radius) * width + x) * 3u
+                              : (y * width + uint(base - radius)) * 3u;
+        uint tap = 0u;
+        for (; tap + 3u < taps; tap += 4u) {
+            vec3 s0 = vec3(image_data.value[src], image_data.value[src + 1u], image_data.value[src + 2u]);
+            src += step;
+            vec3 s1 = vec3(image_data.value[src], image_data.value[src + 1u], image_data.value[src + 2u]);
+            src += step;
+            vec3 s2 = vec3(image_data.value[src], image_data.value[src + 1u], image_data.value[src + 2u]);
+            src += step;
+            vec3 s3 = vec3(image_data.value[src], image_data.value[src + 1u], image_data.value[src + 2u]);
+            src += step;
+            sum += s0 * s_w[tap].xyz;
+            sum += s1 * s_w[tap + 1u].xyz;
+            sum += s2 * s_w[tap + 2u].xyz;
+            sum += s3 * s_w[tap + 3u].xyz;
+        }
+        for (; tap < taps; ++tap) {
+            vec3 s = vec3(image_data.value[src], image_data.value[src + 1u], image_data.value[src + 2u]);
+            src += step;
+            sum += s * s_w[tap].xyz;
+        }
+        if (accumulate != 0u) {
+            uint p3 = 3u * pixel;
+            sum = vec3(accumulator.value[p3], accumulator.value[p3 + 1u], accumulator.value[p3 + 2u])
+                  + sum * s_mix.xyz;
+        }
+    } else if (use_shared) {
+        for (int k = -radius; k <= radius; ++k) {
+            int j = mirror != 0u ? mirror_index(base + k, length)
+                                 : reflect_index(base + k, length);
+            uint source = axis == 0u ? uint(j) * width + x : y * width + uint(j);
+            uint tap = uint(k + radius);
+            vec3 sample_value = vec3(image_data.value[3u * source],
+                                     image_data.value[3u * source + 1u],
+                                     image_data.value[3u * source + 2u]);
+            sum += sample_value * s_w[tap].xyz;
+        }
+        if (accumulate != 0u) {
+            uint p3 = 3u * pixel;
+            sum = vec3(accumulator.value[p3], accumulator.value[p3 + 1u], accumulator.value[p3 + 2u])
+                  + sum * s_mix.xyz;
+        }
+    } else {
+        for (int k = -radius; k <= radius; ++k) {
+            int j = mirror != 0u ? mirror_index(base + k, length)
+                                 : reflect_index(base + k, length);
+            uint source = axis == 0u ? uint(j) * width + x : y * width + uint(j);
+            uint tap = uint(k + radius);
+            vec3 sample_value = vec3(image_data.value[3u * source],
+                                     image_data.value[3u * source + 1u],
+                                     image_data.value[3u * source + 2u]);
+            vec3 weight = vec3(weights.value[tap], weights.value[taps + tap],
+                               weights.value[2u * taps + tap]);
+            sum += sample_value * weight;
+        }
+        if (accumulate != 0u) {
+            uint p3 = 3u * pixel;
+            sum = vec3(accumulator.value[p3], accumulator.value[p3 + 1u], accumulator.value[p3 + 2u])
+                  + sum * vec3(mix_weights.value[0], mix_weights.value[1], mix_weights.value[2]);
+        }
+    }
+    uint p3 = 3u * pixel;
+    output_data.value[p3] = sum.x;
+    output_data.value[p3 + 1u] = sum.y;
+    output_data.value[p3 + 2u] = sum.z;
+}

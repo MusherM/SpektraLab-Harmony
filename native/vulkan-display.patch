@@ -1,6 +1,27 @@
---- vulkan_gpu.cpp
-+++ vulkan_gpu.cpp
-@@ -175,7 +175,9 @@
+--- a/vulkan_gpu.cpp
++++ b/vulkan_gpu.cpp
+@@ -68,6 +68,10 @@
+     {"spk_lut2d_cubic", 5, kWorkgroup},
+     {"spk_sep_fir_acc", 6, kWorkgroup},
+     {"spk_iir_df_acc", 7, kWorkgroup},
++    {"spk_transpose3", 3, kWorkgroup},
++    {"spk_box_down2", 3, kWorkgroup},
++    {"spk_zoom_acc", 7, kWorkgroup},
++    {"spk_iir_f32_acc", 7, kWorkgroup},
+     {"spk_lincomb3", 6, kWorkgroup},
+     {"spk_log10_guarded", 4, kWorkgroup},
+     {"spk_curves", 6, kWorkgroup},
+@@ -130,6 +134,9 @@
+     ~VulkanGpu() override {
+         if (device_) {
+             vkDeviceWaitIdle(device_);
++            in_flight_refs_.clear();
++            if (fence_) vkDestroyFence(device_, fence_, nullptr);
++            if (desc_pool_) vkDestroyDescriptorPool(device_, desc_pool_, nullptr);
+             destroy_buffer(&upload_staging_);
+             destroy_buffer(&read_staging_);
+             for (Buffer* b : buffers_) { destroy_buffer(b); delete b; }
+@@ -175,7 +182,9 @@
          VkApplicationInfo app{};
          app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
          app.pApplicationName = "SpektraLab headless";
@@ -11,7 +32,7 @@
          VkInstanceCreateInfo create{};
          create.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
          create.pApplicationInfo = &app;
-@@ -252,6 +254,8 @@
+@@ -252,6 +261,8 @@
              }
          }
          if (!physical_) { error = "no Vulkan compute queue"; return false; }
@@ -20,52 +41,520 @@
          storage_range_limit_ = properties_.limits.maxStorageBufferRange;
          if (properties_.limits.maxComputeWorkGroupInvocations < kWorkgroup ||
              properties_.limits.maxComputeWorkGroupSize[0] < kWorkgroup ||
-@@ -522,7 +526,8 @@
+@@ -297,6 +308,40 @@
+         pool_create.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+         result = vkCreateCommandPool(device_, &pool_create, nullptr, &command_pool_);
+         if (result != VK_SUCCESS) { error = vk_error("vkCreateCommandPool", result); return false; }
++
++        VkCommandBufferAllocateInfo cmd_alloc{};
++        cmd_alloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
++        cmd_alloc.commandPool = command_pool_;
++        cmd_alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
++        cmd_alloc.commandBufferCount = 1;
++        result = vkAllocateCommandBuffers(device_, &cmd_alloc, &cmd_);
++        if (result != VK_SUCCESS) { error = vk_error("vkAllocateCommandBuffers", result); return false; }
++
++        VkFenceCreateInfo fence_create{};
++        fence_create.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
++        result = vkCreateFence(device_, &fence_create, nullptr, &fence_);
++        if (result != VK_SUCCESS) { error = vk_error("vkCreateFence", result); return false; }
++
++        VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kMaxDescSets * 8u};
++        VkDescriptorPoolCreateInfo dp_create{};
++        dp_create.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
++        dp_create.maxSets = kMaxDescSets;
++        dp_create.poolSizeCount = 1;
++        dp_create.pPoolSizes = &pool_size;
++        result = vkCreateDescriptorPool(device_, &dp_create, nullptr, &desc_pool_);
++        if (result != VK_SUCCESS) { error = vk_error("vkCreateDescriptorPool", result); return false; }
++
++        if (const char* v = std::getenv("SPK_IIR_BATCH"); v && *v) {
++            const long parsed = std::strtol(v, nullptr, 10);
++            if (parsed > 0) iir_batch_ = size_t(parsed);
++        }
++        if (const char* v = std::getenv("SPK_HEAVY_BATCH"); v && *v) {
++            const long parsed = std::strtol(v, nullptr, 10);
++            if (parsed > 0) heavy_batch_ = size_t(parsed);
++        }
++        if (const char* v = std::getenv("SPK_PREFER_CACHED"); v && *v && std::strcmp(v, "0") != 0) {
++            prefer_cached_ = true;
++        }
+         return true;
+     }
+ 
+@@ -454,9 +499,26 @@
+ 
+     void begin_frame() override {
+         std::lock_guard<std::mutex> lock(buffers_mutex_);
++        in_frame_ = true;
+         frame_high_water_ = 0;
+     }
+-    void end_frame() override {}
++    void end_frame() override {
++        std::string ignored;
++        flush(ignored);
++        std::lock_guard<std::mutex> lock(buffers_mutex_);
++        in_frame_ = false;
++        // Release large idle scratch buffers at frame end so idle footprint stays low.
++        for (auto it = buffers_.begin(); it != buffers_.end();) {
++            Buffer* b = *it;
++            if (!b->persistent && b->refs == 0 && b->bytes >= 16u * 1024 * 1024) {
++                destroy_buffer(b);
++                delete b;
++                it = buffers_.erase(it);
++            } else {
++                ++it;
++            }
++        }
++    }
+ 
+     BufferRef alloc(size_t bytes, std::string& error) override { return allocate(bytes, false, error); }
+     BufferRef alloc_zeroed(size_t bytes, std::string& error) override {
+@@ -465,11 +527,16 @@
+         if (!out) return {};
+         std::lock_guard<std::mutex> lock(dispatch_mutex_);
+         const auto start = diagnostic_start();
+-        if (!submit_sync([&](VkCommandBuffer command) {
+-                device_barrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+-                vkCmdFillBuffer(command, out.get()->handle, 0, VkDeviceSize(bytes), 0);
+-                transfer_written(command);
+-            }, "Vulkan zero fill", error)) return {};
++        if (!ensure_cmd_open(error)) return {};
++        if (cmd_has_commands_) {
++            narrow_barrier(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
++                           VK_PIPELINE_STAGE_TRANSFER_BIT,
++                           VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
++                           VK_ACCESS_TRANSFER_WRITE_BIT);
++        }
++        vkCmdFillBuffer(cmd_, out.get()->handle, 0, VkDeviceSize(bytes), 0);
++        in_flight_refs_.push_back(out);
++        cmd_has_commands_ = true;
+         transfer_timing("fill", bytes, start);
+         return out;
+     }
+@@ -522,7 +589,7 @@
          if (!b) return;
          std::lock_guard<std::mutex> lock(buffers_mutex_);
          if (b->refs <= 0) { ++audit_.over_releases; return; }
 -        if (--b->refs == 0 && b->persistent) {
-+        // Dispatch is synchronous; release large idle planes immediately on mobile.
-+        if (--b->refs == 0 && (b->persistent || b->bytes >= 16u * 1024 * 1024)) {
++        if (--b->refs == 0 && (b->persistent || (!in_frame_ && b->bytes >= 16u * 1024 * 1024))) {
              buffers_.erase(std::remove(buffers_.begin(), buffers_.end(), b), buffers_.end());
              destroy_buffer(b);
              delete b;
-@@ -667,17 +672,32 @@
-         }
-         vkUpdateDescriptorSets(device_, uint32_t(writes.size()), writes.data(), 0, nullptr);
- 
--        const bool submitted = submit_sync([&](VkCommandBuffer command) {
-+        // These single-row kernels address independent lines or pixels by global ID.
-+        // Finish each batch before submitting the next so display composition can run.
-+        size_t batch = groups_x;
-+        if (dispatch_base_ && groups_y == 1) {
-+            if (std::strcmp(kernel, "spk_iir_df_acc") == 0) batch = 1;
-+            else if (std::strcmp(kernel, "spk_grain_layers") == 0 ||
-+                     std::strcmp(kernel, "spk_spectral_epilogue") == 0) batch = 256;
+@@ -537,13 +604,18 @@
+         if (!bytes || (dst == src && dst_offset == src_offset)) return true;
+         std::lock_guard<std::mutex> lock(dispatch_mutex_);
+         const auto start = diagnostic_start();
+-        if (!submit_sync([&](VkCommandBuffer command) {
+-                device_barrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT,
+-                               VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
+-                VkBufferCopy range{VkDeviceSize(src_offset), VkDeviceSize(dst_offset), VkDeviceSize(bytes)};
+-                vkCmdCopyBuffer(command, src->handle, dst->handle, 1, &range);
+-                transfer_written(command);
+-            }, "Vulkan device copy", error)) return false;
++        if (!ensure_cmd_open(error)) return {};
++        if (cmd_has_commands_) {
++            narrow_barrier(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
++                           VK_PIPELINE_STAGE_TRANSFER_BIT,
++                           VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
++                           VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
 +        }
-+        bool submitted = true;
-+        for (size_t first = 0; first < groups_x && submitted; first += batch) {
-+            const uint32_t count = uint32_t(std::min(batch, groups_x - first));
-+            submitted = submit_sync([&](VkCommandBuffer command) {
-                 device_barrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-                 vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
-                 vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout,
-                                         0, 1, &set, 0, nullptr);
--                vkCmdDispatch(command, uint32_t(groups_x), uint32_t(groups_y), 1);
-+                if (first == 0) vkCmdDispatch(command, count, uint32_t(groups_y), 1);
-+                else vkCmdDispatchBase(command, uint32_t(first), 0, 0, count, 1, 1);
-             }, "Vulkan compute dispatch", error);
-+        }
-         vkDestroyDescriptorPool(device_, descriptor_pool, nullptr);
-         return submitted;
++        VkBufferCopy range{VkDeviceSize(src_offset), VkDeviceSize(dst_offset), VkDeviceSize(bytes)};
++        vkCmdCopyBuffer(cmd_, src->handle, dst->handle, 1, &range);
++        retain(src); in_flight_refs_.emplace_back(this, src);
++        retain(dst); in_flight_refs_.emplace_back(this, dst);
++        cmd_has_commands_ = true;
+         transfer_timing("copy", bytes, start);
+         return true;
      }
-+
-+    bool dispatch_base_ = false;
+@@ -554,12 +626,22 @@
+         if (!bytes) return true;
+         std::lock_guard<std::mutex> lock(dispatch_mutex_);
+         const auto start = diagnostic_start();
++        if (!flush_locked(error)) return false;
++        // Zero-copy readback when source is already host-visible and either cached or small.
++        if (src->mapped && ((src->memory_flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) || bytes <= 65536u)) {
++            if (!mapped_range_offset(*src, src_offset, bytes, false, error)) return false;
++            std::memcpy(dst, static_cast<const unsigned char*>(src->mapped) + src_offset, bytes);
++            transfer_timing("read_direct", bytes, start);
++            return true;
++        }
+         if (!ensure_staging(read_staging_, std::min(bytes, staging_chunk_bytes_), true, error)) return false;
+         for (size_t offset = 0; offset < bytes;) {
+             const size_t chunk = std::min(bytes - offset, staging_chunk_bytes_);
+             if (!submit_sync([&](VkCommandBuffer command) {
+-                device_barrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT,
+-                               VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
++                narrow_barrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
++                               VK_PIPELINE_STAGE_TRANSFER_BIT,
++                               VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
++                               VK_ACCESS_TRANSFER_READ_BIT);
+                 VkBufferCopy range{VkDeviceSize(src_offset + offset), 0, VkDeviceSize(chunk)};
+                 vkCmdCopyBuffer(command, src->handle, read_staging_.handle, 1, &range);
+                 VkBufferMemoryBarrier barrier{};
+@@ -634,65 +716,108 @@
+         ComputePipeline* pipeline = get_pipeline(*spec, error);
+         if (!pipeline) return false;
  
-     bool flush(std::string&) override { return true; }  // dispatch is synchronous for this milestone
+-        VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, spec->bindings};
+-        VkDescriptorPoolCreateInfo pool_create{};
+-        pool_create.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+-        pool_create.maxSets = 1;
+-        pool_create.poolSizeCount = 1;
+-        pool_create.pPoolSizes = &pool_size;
+-        VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
+-        VkResult result = vkCreateDescriptorPool(device_, &pool_create, nullptr, &descriptor_pool);
+-        if (result != VK_SUCCESS) { error = vk_error("vkCreateDescriptorPool", result); return false; }
+-        VkDescriptorSetAllocateInfo set_alloc{};
+-        set_alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+-        set_alloc.descriptorPool = descriptor_pool;
+-        set_alloc.descriptorSetCount = 1;
+-        set_alloc.pSetLayouts = &pipeline->descriptors;
+-        VkDescriptorSet set = VK_NULL_HANDLE;
+-        result = vkAllocateDescriptorSets(device_, &set_alloc, &set);
+-        if (result != VK_SUCCESS) {
+-            error = vk_error("vkAllocateDescriptorSets", result);
+-            vkDestroyDescriptorPool(device_, descriptor_pool, nullptr);
+-            return false;
+-        }
+-        std::vector<VkWriteDescriptorSet> writes(args.size());
+-        for (uint32_t i = 0; i < args.size(); ++i) {
+-            writes[i] = {};
+-            writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+-            writes[i].dstSet = set;
+-            writes[i].dstBinding = i;
+-            writes[i].descriptorCount = 1;
+-            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+-            writes[i].pBufferInfo = &infos[i];
+-        }
+-        vkUpdateDescriptorSets(device_, uint32_t(writes.size()), writes.data(), 0, nullptr);
+-
+-        const bool submitted = submit_sync([&](VkCommandBuffer command) {
+-                device_barrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
++        // Chunk only very heavy kernels into responsive ~15-40ms slices on mobile.
++        size_t batch = groups_x;
++        bool flush_chunks = false;
++        if (dispatch_base_ && groups_y == 1) {
++            if ((std::strcmp(kernel, "spk_iir_df_acc") == 0 || std::strcmp(kernel, "spk_iir_f32_acc") == 0) && groups_x > iir_batch_) {
++                batch = iir_batch_;
++                flush_chunks = true;
++            } else if ((std::strcmp(kernel, "spk_grain_layers") == 0 ||
++                        std::strcmp(kernel, "spk_spectral_epilogue") == 0) &&
++                       groups_x > heavy_batch_) {
++                batch = heavy_batch_;
++                flush_chunks = true;
++            }
++        }
++
++        if (flush_chunks && cmd_open_) {
++            if (!flush_locked(error)) return false;
++        }
++        if (desc_sets_used_ >= kMaxDescSets) {
++            if (!flush_locked(error)) return false;
++        }
++
++        auto retain_args = [&]() {
++            for (const auto& arg : args) {
++                if (arg.buffer) { retain(arg.buffer); in_flight_refs_.emplace_back(this, arg.buffer); }
++            }
++            for (const auto& ib : inline_buffers) in_flight_refs_.push_back(ib);
++        };
++
++        auto alloc_and_update_set = [&](VkDescriptorSet& out_set) -> bool {
++            VkDescriptorSetAllocateInfo set_alloc{};
++            set_alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
++            set_alloc.descriptorPool = desc_pool_;
++            set_alloc.descriptorSetCount = 1;
++            set_alloc.pSetLayouts = &pipeline->descriptors;
++            VkResult r = vkAllocateDescriptorSets(device_, &set_alloc, &out_set);
++            if (r != VK_SUCCESS) { error = vk_error("vkAllocateDescriptorSets", r); return false; }
++            ++desc_sets_used_;
++            VkWriteDescriptorSet writes[8]{};
++            for (uint32_t i = 0; i < args.size(); ++i) {
++                writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
++                writes[i].dstSet = out_set;
++                writes[i].dstBinding = i;
++                writes[i].descriptorCount = 1;
++                writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
++                writes[i].pBufferInfo = &infos[i];
++            }
++            vkUpdateDescriptorSets(device_, uint32_t(args.size()), writes, 0, nullptr);
++            return true;
++        };
++
++        if (!flush_chunks) {
++            VkDescriptorSet set = VK_NULL_HANDLE;
++            if (!alloc_and_update_set(set)) return false;
++            if (!ensure_cmd_open(error)) return false;
++            if (cmd_has_commands_) {
++                narrow_barrier(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
++                               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
++                               VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+                                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+-                vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
+-                vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout,
+-                                        0, 1, &set, 0, nullptr);
+-                vkCmdDispatch(command, uint32_t(groups_x), uint32_t(groups_y), 1);
+-            }, "Vulkan compute dispatch", error);
+-        vkDestroyDescriptorPool(device_, descriptor_pool, nullptr);
+-        return submitted;
+-    }
+-
+-    bool flush(std::string&) override { return true; }  // dispatch is synchronous for this milestone
++            }
++            vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
++            vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout,
++                                    0, 1, &set, 0, nullptr);
++            vkCmdDispatch(cmd_, uint32_t(groups_x), uint32_t(groups_y), 1);
++            retain_args();
++            cmd_has_commands_ = true;
++            return true;
++        }
++
++        for (size_t first = 0; first < groups_x; first += batch) {
++            const uint32_t count = uint32_t(std::min(batch, groups_x - first));
++            VkDescriptorSet set = VK_NULL_HANDLE;
++            if (!alloc_and_update_set(set)) return false;
++            if (!ensure_cmd_open(error)) return false;
++            vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
++            vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout,
++                                    0, 1, &set, 0, nullptr);
++            if (first == 0) vkCmdDispatch(cmd_, count, uint32_t(groups_y), 1);
++            else vkCmdDispatchBase(cmd_, uint32_t(first), 0, 0, count, 1, 1);
++            retain_args();
++            cmd_has_commands_ = true;
++            if (!flush_locked(error)) return false;
++        }
++        return true;
++    }
++
++    bool flush(std::string& error) override {
++        std::lock_guard<std::mutex> lock(dispatch_mutex_);
++        return flush_locked(error);
++    }
      void* texture(Buffer* buffer, uint32_t width, uint32_t height,
-@@ -1093,6 +1113,7 @@
+                   uint32_t row_stride_px, std::string& error) override {
++        const size_t bytes = size_t(row_stride_px) * height * 4u * sizeof(uint16_t);
+         if (!buffer || width == 0 || height == 0 || row_stride_px < width ||
+-            size_t(row_stride_px) * height * 4u * sizeof(uint16_t) != buffer->bytes) {
++            bytes > buffer->bytes) {
+             error = "invalid Vulkan result buffer";
+             return nullptr;
+         }
+-        // A headless result is a separate CPU-owned RGBA16 copy. It remains
+-        // valid after the engine and VkDevice are destroyed, just as a Metal
+-        // texture keeps its own result alive after the render's buffers go.
+-        void* pixels = std::malloc(buffer->bytes);
++        void* pixels = std::malloc(bytes);
+         if (!pixels) { error = "cannot allocate Vulkan result pixels"; return nullptr; }
+-        if (!read(buffer, 0, pixels, buffer->bytes, error)) {
++        if (!read(buffer, 0, pixels, bytes, error)) {
+             std::free(pixels);
+             return nullptr;
+         }
+@@ -723,9 +848,9 @@
+         return out;
+     }
+     size_t trim_pool(size_t keep_bytes) override {
+-        // Match transfer/dispatch lock order. Every queue submission is
+-        // synchronous, so owning this lock also makes staging safe to destroy.
+         std::lock_guard<std::mutex> dispatch_lock(dispatch_mutex_);
++        std::string ignored;
++        flush_locked(ignored);
+         std::lock_guard<std::mutex> lock(buffers_mutex_);
+         size_t total = 0, freed = 0;
+         for (const Buffer* b : buffers_) if (!b->persistent) total += b->bytes;
+@@ -777,35 +902,106 @@
+ 
+     // Caller holds dispatch_mutex_: one queue and command pool, and synchronous
+     // completion before any staging allocation or pooled buffer can be reused.
+-    template <typename Record>
+-    bool submit_sync(Record&& record, const char* operation, std::string& error) {
+-        VkCommandBufferAllocateInfo allocate_info{};
+-        allocate_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+-        allocate_info.commandPool = command_pool_;
+-        allocate_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+-        allocate_info.commandBufferCount = 1;
+-        VkCommandBuffer command = VK_NULL_HANDLE;
+-        VkResult result = vkAllocateCommandBuffers(device_, &allocate_info, &command);
++    static void narrow_barrier(VkCommandBuffer command, VkPipelineStageFlags src_stage,
++                               VkPipelineStageFlags dst_stage, VkAccessFlags src_access,
++                               VkAccessFlags dst_access) {
++        VkMemoryBarrier barrier{};
++        barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
++        barrier.srcAccessMask = src_access;
++        barrier.dstAccessMask = dst_access;
++        vkCmdPipelineBarrier(command, src_stage, dst_stage, 0, 1, &barrier, 0, nullptr, 0, nullptr);
++    }
++
++    bool ensure_cmd_open(std::string& error) {
++        if (cmd_open_) return true;
++        VkResult result = vkResetCommandBuffer(cmd_, 0);
+         if (result == VK_SUCCESS) {
+             VkCommandBufferBeginInfo begin{};
+             begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+             begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+-            result = vkBeginCommandBuffer(command, &begin);
++            result = vkBeginCommandBuffer(cmd_, &begin);
++        }
++        if (result != VK_SUCCESS) { error = vk_error("vkBeginCommandBuffer", result); return false; }
++        cmd_open_ = true;
++        cmd_has_commands_ = false;
++        return true;
++    }
++
++    bool flush_locked(std::string& error) {
++        if (!cmd_open_) {
++            if (desc_sets_used_ > 0) {
++                vkResetDescriptorPool(device_, desc_pool_, 0);
++                desc_sets_used_ = 0;
++            }
++            in_flight_refs_.clear();
++            return true;
++        }
++        VkResult result = vkEndCommandBuffer(cmd_);
++        if (result == VK_SUCCESS && cmd_has_commands_) {
++            VkSubmitInfo submit{};
++            submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
++            submit.commandBufferCount = 1;
++            submit.pCommandBuffers = &cmd_;
++            result = vkQueueSubmit(queue_, 1, &submit, fence_);
++            if (result == VK_SUCCESS) result = vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX);
++            if (result == VK_SUCCESS) result = vkResetFences(device_, 1, &fence_);
++        }
++        cmd_open_ = false;
++        cmd_has_commands_ = false;
++        if (desc_sets_used_ > 0) {
++            vkResetDescriptorPool(device_, desc_pool_, 0);
++            desc_sets_used_ = 0;
++        }
++        in_flight_refs_.clear();
++        if (result != VK_SUCCESS) { error = vk_error("Vulkan flush", result); return false; }
++        return true;
++    }
++
++    template <typename Record>
++    bool submit_sync(Record&& record, const char* operation, std::string& error) {
++        if (cmd_open_ && !flush_locked(error)) return false;
++        VkResult result = vkResetCommandBuffer(cmd_, 0);
++        if (result == VK_SUCCESS) {
++            VkCommandBufferBeginInfo begin{};
++            begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
++            begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
++            result = vkBeginCommandBuffer(cmd_, &begin);
+             if (result == VK_SUCCESS) {
+-                record(command);
+-                result = vkEndCommandBuffer(command);
++                record(cmd_);
++                result = vkEndCommandBuffer(cmd_);
+             }
+             if (result == VK_SUCCESS) {
+                 VkSubmitInfo submit{};
+                 submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+                 submit.commandBufferCount = 1;
+-                submit.pCommandBuffers = &command;
+-                result = vkQueueSubmit(queue_, 1, &submit, VK_NULL_HANDLE);
+-                if (result == VK_SUCCESS) result = vkQueueWaitIdle(queue_);
+-            }
+-            vkFreeCommandBuffers(device_, command_pool_, 1, &command);
++                submit.pCommandBuffers = &cmd_;
++                result = vkQueueSubmit(queue_, 1, &submit, fence_);
++                if (result == VK_SUCCESS) result = vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX);
++                if (result == VK_SUCCESS) result = vkResetFences(device_, 1, &fence_);
++            }
+         }
+         if (result != VK_SUCCESS) { error = vk_error(operation, result); return false; }
++        return true;
++    }
++
++    bool mapped_range_offset(const Buffer& buf, size_t offset, size_t bytes, bool flush_op, std::string& error) {
++        if (buf.memory_flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) return true;
++        const VkDeviceSize atom = properties_.limits.nonCoherentAtomSize;
++        const VkDeviceSize aligned_off = (VkDeviceSize(offset) / atom) * atom;
++        VkDeviceSize end = VkDeviceSize(offset + bytes);
++        const VkDeviceSize rem = end % atom;
++        if (rem) end = std::min(buf.allocation_bytes, end + (atom - rem));
++        VkMappedMemoryRange range{};
++        range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
++        range.memory = buf.memory;
++        range.offset = aligned_off;
++        range.size = end - aligned_off;
++        const VkResult result = flush_op ? vkFlushMappedMemoryRanges(device_, 1, &range)
++                                         : vkInvalidateMappedMemoryRanges(device_, 1, &range);
++        if (result != VK_SUCCESS) {
++            error = vk_error(flush_op ? "vkFlushMappedMemoryRanges" : "vkInvalidateMappedMemoryRanges", result);
++            return false;
++        }
+         return true;
+     }
+ 
+@@ -883,6 +1079,21 @@
+         const auto start = diagnostic_start();
+         BufferRef out = allocate(bytes, persistent, error);
+         if (!out) return {};
++        // Zero-copy direct write on unified-memory GPUs (DEVICE_LOCAL | HOST_VISIBLE).
++        // `out` was freshly allocated or free (not in_flight_refs_), so host writes
++        // strictly precede any future vkQueueSubmit referencing `out`.
++        if (out.get()->mapped) {
++            if (narrow) {
++                float* dst = static_cast<float*>(out.get()->mapped);
++                const size_t count = bytes / sizeof(float);
++                for (size_t i = 0; i < count; ++i) dst[i] = float(narrow[i]);
++            } else {
++                std::memcpy(out.get()->mapped, raw, bytes);
++            }
++            if (!mapped_range(*out.get(), bytes, true, error)) return {};
++            transfer_timing("upload_direct", bytes, start);
++            return out;
++        }
+         std::lock_guard<std::mutex> lock(dispatch_mutex_);
+         if (!ensure_staging(upload_staging_, std::min(bytes, staging_chunk_bytes_), false, error)) return {};
+         for (size_t offset = 0; offset < bytes;) {
+@@ -926,8 +1137,9 @@
+         std::lock_guard<std::mutex> lock(buffers_mutex_);
+         if (!persistent) {
+             Buffer* best = nullptr;
++            const size_t max_match = std::max<size_t>(bytes * 2u, 4096u);
+             for (Buffer* b : buffers_)
+-                if (!b->persistent && b->refs == 0 && b->bytes >= bytes &&
++                if (!b->persistent && b->refs == 0 && b->bytes >= bytes && b->bytes <= max_match &&
+                     (!best || b->bytes < best->bytes)) best = b;
+             if (best) {
+                 best->refs = 1;
+@@ -985,8 +1197,21 @@
+                 if (readback && (flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)) score += 8;
+                 if (flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) score += 4;
+                 if (!(flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) score += 2;
+-            } else if (!(flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
+-                score += 1;
++            } else {
++                // On unified mobile GPUs, DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT
++                // avoids staging copies and queue waits for every upload.
++                // Prefer pure DEVICE_LOCAL only on discrete GPUs.
++                const bool discrete = properties_.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
++                if (discrete) {
++                    if (!(flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) score += 4;
++                } else {
++                    if (prefer_cached_ &&
++                        (flags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT)) ==
++                        (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT)) score += 5;
++                    if ((flags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
++                        (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) score += 4;
++                    else if (flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) score += 2;
++                }
+             }
+             if (score > best_score) {
+                 memory_index = i;
+@@ -1007,7 +1232,7 @@
+         b.allocation_bytes = requirements.size;
+         result = vkAllocateMemory(device_, &allocate_info, nullptr, &b.memory);
+         if (result == VK_SUCCESS) result = vkBindBufferMemory(device_, b.handle, b.memory, 0);
+-        if (result == VK_SUCCESS && staging)
++        if (result == VK_SUCCESS && (staging || (b.memory_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)))
+             result = vkMapMemory(device_, b.memory, 0, VK_WHOLE_SIZE, 0, &b.mapped);
+         if (result != VK_SUCCESS) {
+             error = vk_error("Vulkan buffer memory", result);
+@@ -1093,6 +1318,7 @@
              stage.pSpecializationInfo = &special;
              VkComputePipelineCreateInfo pipeline_create{};
              pipeline_create.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
@@ -73,3 +562,24 @@
              pipeline_create.stage = stage;
              pipeline_create.layout = p.layout;
              result = vkCreateComputePipelines(device_, VK_NULL_HANDLE, 1, &pipeline_create,
+@@ -1123,7 +1349,20 @@
+     VkDevice device_ = VK_NULL_HANDLE;
+     VkQueue queue_ = VK_NULL_HANDLE;
+     uint32_t queue_family_ = 0;
++    static constexpr uint32_t kMaxDescSets = 512;
+     VkCommandPool command_pool_ = VK_NULL_HANDLE;
++    VkCommandBuffer cmd_ = VK_NULL_HANDLE;
++    VkFence fence_ = VK_NULL_HANDLE;
++    VkDescriptorPool desc_pool_ = VK_NULL_HANDLE;
++    bool dispatch_base_ = false;
++    bool cmd_open_ = false;
++    bool cmd_has_commands_ = false;
++    bool in_frame_ = false;
++    bool prefer_cached_ = false;
++    uint32_t desc_sets_used_ = 0;
++    size_t iir_batch_ = 64;
++    size_t heavy_batch_ = 65536;
++    std::vector<BufferRef> in_flight_refs_;
+     std::unordered_map<std::string, ComputePipeline> pipelines_;
+     mutable std::mutex buffers_mutex_;
+     std::mutex dispatch_mutex_;

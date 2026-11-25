@@ -1,0 +1,428 @@
+--- a/blur.cpp
++++ b/blur.cpp
+@@ -1,4 +1,5 @@
+ #include "blur.hpp"
++#include "render_quality.hpp"
+ 
+ #include <cmath>
+ #include <cstring>
+@@ -19,6 +20,111 @@
+     dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2];
+ }
+ 
++bool transpose3(gpu::Gpu* gpu, const Image& src, Image& dst, std::string& error) {
++    dst.h = src.w;
++    dst.w = src.h;
++    dst.c = src.c;
++    dst.buf = gpu->alloc(src.bytes(), error);
++    if (!dst.buf) return false;
++    const uint32_t tiles_x = (src.w + 15u) >> 4u;
++    const uint32_t tiles_y = (src.h + 15u) >> 4u;
++    const uint32_t meta[2] = {src.h, src.w};
++    return gpu->dispatch("spk_transpose3",
++                         {gpu::Arg::buf(src.buf), gpu::Arg::inline_bytes(meta, 2), gpu::Arg::buf(dst.buf)},
++                         size_t(tiles_x) * size_t(tiles_y) * 256u, error);
++}
++
++bool box_down2(gpu::Gpu* gpu, const Image& src, Image& dst, std::string& error) {
++    dst.h = std::max(1u, (src.h + 1u) >> 1u);
++    dst.w = std::max(1u, (src.w + 1u) >> 1u);
++    dst.c = src.c;
++    dst.buf = gpu->alloc(dst.bytes(), error);
++    if (!dst.buf) return false;
++    const uint32_t meta[4] = {src.h, src.w, dst.h, dst.w};
++    return gpu->dispatch("spk_box_down2",
++                         {gpu::Arg::buf(src.buf), gpu::Arg::inline_bytes(meta, 4), gpu::Arg::buf(dst.buf)},
++                         dst.pixels(), error);
++}
++
++bool iir_coalesced(gpu::Gpu* gpu, Blur::SweepReport* sweep_report, const Image& img,
++                   const Image* pre_transposed, const double sigmas[3], const bool active[3],
++                   Image& out, std::string& error, const Image* acc, const double* weight,
++                   bool use_f32 = false) {
++    float coef[24] = {};
++    uint32_t act[3] = {0, 0, 0};
++    bool any = false;
++    for (int c = 0; c < 3; ++c) {
++        if (!(active[c] && sigmas[c] > 0.0)) continue;
++        double b[4];
++        yvv_coeffs(sigmas[c], b);
++        for (int j = 0; j < 4; ++j) {
++            const auto hl = split(b[j]);
++            coef[8 * c + 2 * j] = hl.first;
++            coef[8 * c + 2 * j + 1] = hl.second;
++        }
++        act[c] = 1;
++        any = true;
++    }
++    if (!any && !acc) { out = img; return true; }
++
++    gpu::BufferRef coef_buf = gpu->upload(coef, sizeof coef, error);
++    gpu::BufferRef act_buf = gpu->upload_u32(act, 3, error);
++    if (!coef_buf || !act_buf) return false;
++    double wt[3];
++    broadcast3(weight, wt, 1.0);
++    const float wtf[3] = {float(wt[0]), float(wt[1]), float(wt[2])};
++    gpu::BufferRef wt_buf = gpu->upload(wtf, sizeof wtf, error);
++    if (!wt_buf) return false;
++
++    // Bit-exact coalesced horizontal IIR:
++    // Transpose (H, W) -> (W, H), run coalesced vertical IIR (axis = 0) on (W, H)
++    // which performs the exact same horizontal recurrence in the exact same order,
++    // transpose back (W, H) -> (H, W), then run coalesced vertical IIR (axis = 0)
++    // in place with optional multiply-add accumulation.
++    Image owned_T;
++    const Image* img_T = pre_transposed;
++    if (!img_T || !img_T->buf) {
++        if (!transpose3(gpu, img, owned_T, error)) return false;
++        img_T = &owned_T;
++    }
++
++    Image tmp_T;
++    tmp_T.h = img_T->h; tmp_T.w = img_T->w; tmp_T.c = img_T->c;
++    tmp_T.buf = gpu->alloc(img_T->bytes(), error);
++    if (!tmp_T.buf) return false;
++
++    const Image* dummy = acc ? acc : &img;
++    // Pass 1 (horizontal on original == vertical axis=0 on transposed (W, H)):
++    const char* iir_kern = use_f32 ? "spk_iir_f32_acc" : "spk_iir_df_acc";
++    const uint32_t meta_h_t[4] = {img_T->h, img_T->w, 0u, 0u};
++    if (!gpu->dispatch(iir_kern,
++                       {gpu::Arg::buf(img_T->buf), gpu::Arg::buf(coef_buf), gpu::Arg::buf(act_buf),
++                        gpu::Arg::buf(img_T->buf), gpu::Arg::buf(wt_buf),
++                        gpu::Arg::inline_bytes(meta_h_t, 4), gpu::Arg::buf(tmp_T.buf)},
++                       size_t(img_T->w) * 3, error)) return false;
++
++    // Release temporary owned_T early if we created it.
++    owned_T = Image{};
++
++    // Transpose back (W, H) -> (H, W) directly into out.
++    if (!transpose3(gpu, tmp_T, out, error)) return false;
++    tmp_T = Image{};
++
++    // Pass 2 (vertical axis=0 on (H, W), in-place on out, carrying accumulate/weight):
++    const uint32_t meta_v[4] = {img.h, img.w, acc ? 1u : 0u, 0u};
++    if (!gpu->dispatch(iir_kern,
++                       {gpu::Arg::buf(out.buf), gpu::Arg::buf(coef_buf), gpu::Arg::buf(act_buf),
++                        gpu::Arg::buf(dummy->buf), gpu::Arg::buf(wt_buf),
++                        gpu::Arg::inline_bytes(meta_v, 4), gpu::Arg::buf(out.buf)},
++                       size_t(img.w) * 3, error)) return false;
++
++    if (sweep_report) {
++        sweep_report->bands.push_back({0, img.h});
++        sweep_report->launches += 2;
++    }
++    return true;
++}
++
+ }  // namespace
+ 
+ bool Blur::alloc_like(const Image& img, Image& out, std::string& error) {
+@@ -29,8 +135,6 @@
+ 
+ bool Blur::fir(const Image& img, const double sigmas[3], double truncate, const bool active[3],
+                Image& out, std::string& error, const Image* acc, const double* weight) {
+-    // (3, 2R+1) weights, a delta for every inactive channel, so one kernel
+-    // handles a mix of blurred and pass-through channels in one pass.
+     Vec kernels[3];
+     size_t radii[3] = {0, 0, 0};
+     for (int c = 0; c < 3; ++c) {
+@@ -55,8 +159,6 @@
+     gpu::BufferRef wt_buf = gpu_->upload(wtf, sizeof wtf, error);
+     if (!wt_buf) return false;
+ 
+-    // The reference runs vertical then horizontal, and the fused multiply-add
+-    // rides on the second pass.
+     Image tmp;
+     if (!alloc_like(img, tmp, error)) return false;
+     if (!alloc_like(img, out, error)) return false;
+@@ -76,84 +178,11 @@
+ 
+ bool Blur::iir(const Image& img, const double sigmas[3], const bool active[3],
+                Image& out, std::string& error, const Image* acc, const double* weight) {
+-    float coef[24] = {};
+-    uint32_t act[3] = {0, 0, 0};
+-    bool any = false;
+-    for (int c = 0; c < 3; ++c) {
+-        if (!(active[c] && sigmas[c] > 0.0)) continue;
+-        double b[4];
+-        yvv_coeffs(sigmas[c], b);
+-        for (int j = 0; j < 4; ++j) {
+-            const auto hl = split(b[j]);
+-            coef[8 * c + 2 * j] = hl.first;
+-            coef[8 * c + 2 * j + 1] = hl.second;
+-        }
+-        act[c] = 1;
+-        any = true;
+-    }
+-    if (!any && !acc) { out = img; return true; }
+-
+-    gpu::BufferRef coef_buf = gpu_->upload(coef, sizeof coef, error);
+-    gpu::BufferRef act_buf = gpu_->upload_u32(act, 3, error);
+-    if (!coef_buf || !act_buf) return false;
+-    double wt[3];
+-    broadcast3(weight, wt, 1.0);
+-    const float wtf[3] = {float(wt[0]), float(wt[1]), float(wt[2])};
+-    gpu::BufferRef wt_buf = gpu_->upload(wtf, sizeof wtf, error);
+-    if (!wt_buf) return false;
+-
+-    // **Two launches and one plane.** The vertical pass runs first, in place
+-    // over the destination; the horizontal pass is the *same kernel* with
+-    // `axis = 1`, marching along rows with stride 3 rather than down the
+-    // columns of a transposed copy. What the transposed path bought was
+-    // coalesced reads for the horizontal recurrence and it cost three extra
+-    // full planes to get them: the transpose, its result, and the transpose
+-    // back. Those are gone, and the arithmetic is untouched -- the same
+-    // instructions in the same order, at different addresses.
+-    if (!alloc_like(img, out, error)) return false;
+-    const Image* dummy = acc ? acc : &img;
+-    // **Horizontal first, and the order is not a detail.** The reference's
+-    // `_gaussian_filter_2d_large` is `_iir_horizontal` then `_iir_vertical`,
+-    // and a separable IIR's two passes commute in exact arithmetic and *not* in
+-    // floating point: run them the other way round and every value moves in the
+-    // last place. The transposed path was horizontal-first for this reason --
+-    // the transpose existed so that pass could be the vertical kernel -- and
+-    // the first draft of this rewrite had it vertical-first, with a comment
+-    // claiming the order was preserved. `iir_bitexact.py` against the previous
+-    // build said otherwise, which is what that gate is for: the parity
+-    // harnesses hold a 1e-5 tolerance and would have absorbed it.
+-    //
+-    // The first pass is plain and the second carries the mixture's multiply-add,
+-    // which is also where the fused multiply-add landed in the transposed path.
+-    const uint32_t meta_h[4] = {img.h, img.w, 0u, 1u};
+-    const uint32_t meta_v[4] = {img.h, img.w, acc ? 1u : 0u, 0u};
+-    if (!gpu_->dispatch("spk_iir_df_acc",
+-                        {gpu::Arg::buf(img.buf), gpu::Arg::buf(coef_buf), gpu::Arg::buf(act_buf),
+-                         gpu::Arg::buf(dummy->buf), gpu::Arg::buf(wt_buf),
+-                         gpu::Arg::inline_bytes(meta_h, 4), gpu::Arg::buf(out.buf)},
+-                        size_t(img.h) * 3, error)) return false;
+-    if (!gpu_->dispatch("spk_iir_df_acc",
+-                        {gpu::Arg::buf(out.buf), gpu::Arg::buf(coef_buf), gpu::Arg::buf(act_buf),
+-                         gpu::Arg::buf(dummy->buf), gpu::Arg::buf(wt_buf),
+-                         gpu::Arg::inline_bytes(meta_v, 4), gpu::Arg::buf(out.buf)},
+-                        size_t(img.w) * 3, error)) return false;
+-    // What a `Swept` stage reports: this pass covers the plane once, as one
+-    // span, whatever the executor's plan says -- the plan is about bands and
+-    // this never makes one. Filled here rather than by the caller, so the
+-    // report is what was launched and not what was intended.
+-    if (sweep_report_) {
+-        sweep_report_->bands.push_back({0, img.h});
+-        sweep_report_->launches += 2;
+-    }
+-    return true;
++    return iir_coalesced(gpu_, sweep_report_, img, nullptr, sigmas, active, out, error, acc, weight);
+ }
+ 
+ uint32_t Blur::fir_radius(double sigma, double truncate) {
+     if (!is_fir(sigma)) return 0;
+-    // Asked of the kernel builder itself rather than recomputed: this function
+-    // exists so the executor knows how many rows of context to copy, and the
+-    // one thing it must not do is round `truncate * sigma + 0.5` differently
+-    // from the kernel that will read them.
+     Vec ignored;
+     return uint32_t(gaussian_kernel_1d(sigma, truncate, ignored));
+ }
+@@ -161,7 +190,7 @@
+ Blur::Demand Blur::demand(const double sigma[3], double truncate) {
+     Demand d;
+     for (int c = 0; c < 3; ++c) {
+-        if (!(sigma[c] > 0.0)) continue;  // identity: no pass, no context
++        if (!(sigma[c] > 0.0)) continue;
+         if (is_fir(sigma[c])) d.halo = std::max(d.halo, fir_radius(sigma[c], truncate));
+         else d.carried = true;
+     }
+@@ -169,10 +198,6 @@
+ }
+ 
+ Blur::Demand Blur::demand(const std::vector<Component>& components, double truncate) {
+-    // Every component runs -- `mixture` does not skip one for a zero weight,
+-    // it blurs it and multiplies by zero -- so this is exact rather than
+-    // conservative. The components are **alternatives** of one input, which is
+-    // why this is a max: sequence is the caller's sum.
+     Demand d;
+     for (const Component& comp : components) d = merge(d, demand(comp.sigma, truncate));
+     return d;
+@@ -212,7 +237,6 @@
+     }
+     if (!any_iir) return fir(img, sigma, truncate, use_fir, out, error, acc, weight);
+     if (!any_fir) return iir(img, sigma, use_iir, out, error, acc, weight);
+-    // Mixed FIR / IIR channels: blur fully, then one fused multiply-add.
+     Image blurred;
+     if (!gaussian(img, sigma, blurred, error, truncate)) return false;
+     const double a[3] = {1.0, 1.0, 1.0};
+@@ -238,14 +262,142 @@
+ 
+ bool Blur::mixture(const Image& img, const std::vector<Component>& components, Image& out,
+                    std::string& error, double truncate) {
++    const auto quality = harmony_perf::current_render_quality();
++    if (quality.mixture_scale >= 2 && img.h >= 256u && img.w >= 256u) {
++        // Tier B fast mode: downsample once, run the entire mixture at 1/mixture_scale,
++        // and bilinear-upsample the summed result once back to full resolution.
++        Image small = img;
++        for (int s = 1; s < quality.mixture_scale; s *= 2) {
++            Image next;
++            if (!box_down2(gpu_, small, next, error)) return false;
++            small = next;
++        }
++        std::vector<Component> scaled_comps = components;
++        for (Component& c : scaled_comps) {
++            for (int ch = 0; ch < 3; ++ch) c.sigma[ch] /= double(quality.mixture_scale);
++        }
++        size_t pure_iir_small = 0;
++        for (const Component& comp : scaled_comps) {
++            bool any_fir = false, any_iir = false;
++            for (int c = 0; c < 3; ++c) {
++                any_fir |= comp.sigma[c] > 0.0 && comp.sigma[c] < kSmallSigmaMax;
++                any_iir |= comp.sigma[c] >= kSmallSigmaMax;
++            }
++            if (any_iir && !any_fir) ++pure_iir_small;
++        }
++        Image small_T;
++        if (pure_iir_small >= 2 && !transpose3(gpu_, small, small_T, error)) return false;
++        const bool use_f32 = quality.iir_f32;
++        bool have_acc = false;
++        Image acc;
++        for (const Component& comp : scaled_comps) {
++            const bool identity = comp.sigma[0] <= 0.0 && comp.sigma[1] <= 0.0 && comp.sigma[2] <= 0.0;
++            bool use_fir[3], use_iir[3];
++            bool any_fir = false, any_iir = false;
++            for (int c = 0; c < 3; ++c) {
++                use_fir[c] = comp.sigma[c] > 0.0 && comp.sigma[c] < kSmallSigmaMax;
++                use_iir[c] = comp.sigma[c] >= kSmallSigmaMax;
++                any_fir |= use_fir[c];
++                any_iir |= use_iir[c];
++            }
++            if (!have_acc) {
++                if (identity) {
++                    const double a[3] = {0.0, 0.0, 0.0};
++                    if (!lincomb(small, small, a, comp.weight, acc, error)) return false;
++                } else {
++                    Image zero;
++                    zero.h = small.h; zero.w = small.w; zero.c = small.c;
++                    zero.buf = gpu_->alloc_zeroed(small.bytes(), error);
++                    if (!zero.buf) return false;
++                    if (any_iir && !any_fir) {
++                        if (!iir_coalesced(gpu_, sweep_report_, small, small_T.buf ? &small_T : nullptr,
++                                           comp.sigma, use_iir, acc, error, &zero, comp.weight, use_f32))
++                            return false;
++                    } else if (!any_iir) {
++                        if (!fir(small, comp.sigma, truncate, use_fir, acc, error, &zero, comp.weight))
++                            return false;
++                    } else {
++                        Image cur = small;
++                        if (any_fir) {
++                            Image next;
++                            if (!fir(cur, comp.sigma, truncate, use_fir, next, error, nullptr, nullptr))
++                                return false;
++                            cur = next;
++                        }
++                        if (!iir_coalesced(gpu_, sweep_report_, cur, nullptr, comp.sigma, use_iir,
++                                           acc, error, &zero, comp.weight, use_f32)) return false;
++                    }
++                }
++                have_acc = true;
++            } else {
++                Image next;
++                if (any_iir && !any_fir) {
++                    if (!iir_coalesced(gpu_, sweep_report_, small, small_T.buf ? &small_T : nullptr,
++                                       comp.sigma, use_iir, next, error, &acc, comp.weight, use_f32))
++                        return false;
++                } else if (!any_iir) {
++                    if (!fir(small, comp.sigma, truncate, use_fir, next, error, &acc, comp.weight))
++                        return false;
++                } else {
++                    Image cur = small;
++                    if (any_fir) {
++                        Image tmp;
++                        if (!fir(cur, comp.sigma, truncate, use_fir, tmp, error, nullptr, nullptr))
++                            return false;
++                        cur = tmp;
++                    }
++                    if (!iir_coalesced(gpu_, sweep_report_, cur, nullptr, comp.sigma, use_iir,
++                                       next, error, &acc, comp.weight, use_f32)) return false;
++                }
++                acc = next;
++            }
++        }
++        if (!have_acc) { error = "blur mixture with no components"; return false; }
++        const uint32_t act_u[3] = {1u, 1u, 1u};
++        const float ones[3] = {1.0f, 1.0f, 1.0f};
++        gpu::BufferRef act_buf = gpu_->upload_u32(act_u, 3, error);
++        gpu::BufferRef wt_buf = gpu_->upload(ones, sizeof ones, error);
++        if (!act_buf || !wt_buf) return false;
++        if (!alloc_like(img, out, error)) return false;
++        const uint32_t meta[5] = {acc.h, acc.w, img.h, img.w, 0u};
++        return gpu_->dispatch("spk_zoom_acc",
++                              {gpu::Arg::buf(acc.buf), gpu::Arg::buf(img.buf),
++                               gpu::Arg::buf(img.buf), gpu::Arg::buf(act_buf),
++                               gpu::Arg::buf(wt_buf), gpu::Arg::inline_bytes(meta, 5),
++                               gpu::Arg::buf(out.buf)},
++                              img.pixels(), error);
++    }
++
++    // Exact bit-exact path: count how many pure-IIR components directly consume `img`.
++    // When >= 2, transpose `img` once and reuse across all pure-IIR components.
++    size_t pure_iir_count = 0;
++    for (const Component& comp : components) {
++        bool any_fir = false, any_iir = false;
++        for (int c = 0; c < 3; ++c) {
++            any_fir |= comp.sigma[c] > 0.0 && comp.sigma[c] < kSmallSigmaMax;
++            any_iir |= comp.sigma[c] >= kSmallSigmaMax;
++        }
++        if (any_iir && !any_fir) ++pure_iir_count;
++    }
++    Image img_T;
++    if (pure_iir_count >= 2) {
++        if (!transpose3(gpu_, img, img_T, error)) return false;
++    }
++
+     bool have_acc = false;
+     Image acc;
+     for (const Component& comp : components) {
+         const bool identity = comp.sigma[0] <= 0.0 && comp.sigma[1] <= 0.0 && comp.sigma[2] <= 0.0;
++        bool use_fir[3], use_iir[3];
++        bool any_fir = false, any_iir = false;
++        for (int c = 0; c < 3; ++c) {
++            use_fir[c] = comp.sigma[c] > 0.0 && comp.sigma[c] < kSmallSigmaMax;
++            use_iir[c] = comp.sigma[c] >= kSmallSigmaMax;
++            any_fir |= use_fir[c];
++            any_iir |= use_iir[c];
++        }
+         if (!have_acc) {
+             if (identity) {
+-                // `G(0)` is the input; the reference still forms
+-                // `0 * img + weight * img` so the accumulator exists.
+                 const double a[3] = {0.0, 0.0, 0.0};
+                 if (!lincomb(img, img, a, comp.weight, acc, error)) return false;
+             } else {
+@@ -253,18 +405,24 @@
+                 zero.h = img.h; zero.w = img.w; zero.c = img.c;
+                 zero.buf = gpu_->alloc_zeroed(img.bytes(), error);
+                 if (!zero.buf) return false;
+-                if (!gaussian(img, comp.sigma, acc, error, truncate, &zero, comp.weight)) return false;
++                if (any_iir && !any_fir && img_T.buf) {
++                    if (!iir_coalesced(gpu_, sweep_report_, img, &img_T, comp.sigma, use_iir,
++                                       acc, error, &zero, comp.weight)) return false;
++                } else {
++                    if (!gaussian(img, comp.sigma, acc, error, truncate, &zero, comp.weight)) return false;
++                }
+             }
+             have_acc = true;
+         } else {
+             Image next;
+-            if (!gaussian(img, comp.sigma, next, error, truncate, &acc, comp.weight)) return false;
++            if (any_iir && !any_fir && img_T.buf) {
++                if (!iir_coalesced(gpu_, sweep_report_, img, &img_T, comp.sigma, use_iir,
++                                   next, error, &acc, comp.weight)) return false;
++            } else {
++                if (!gaussian(img, comp.sigma, next, error, truncate, &acc, comp.weight)) return false;
++            }
+             acc = next;
+         }
+-        // A mixture is where one node holds the most memory: halation's
+-        // scatter is four components and each IIR pass needs a transpose, a
+-        // result, and a transpose back. Evaluating between components lets the
+-        // previous component's scratch be the next one's.
+         if (!gpu_->flush(error)) return false;
+     }
+     if (!have_acc) { error = "blur mixture with no components"; return false; }

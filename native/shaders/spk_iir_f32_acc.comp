@@ -1,0 +1,73 @@
+#version 450
+// Single-precision float32 Young & van Vliet IIR for downsampled Tier B blur mixtures.
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0, std430) readonly buffer Input { float value[]; } image_data;
+layout(set = 0, binding = 1, std430) readonly buffer Coefficients { float value[]; } coefficients;
+layout(set = 0, binding = 2, std430) readonly buffer Active { uint value[]; } active_channels;
+layout(set = 0, binding = 3, std430) readonly buffer Accumulator { float value[]; } accumulator;
+layout(set = 0, binding = 4, std430) readonly buffer MixWeights { float value[]; } mix_weights;
+layout(set = 0, binding = 5, std430) readonly buffer Meta { uint value[]; } meta;
+layout(set = 0, binding = 6, std430) buffer Output { float value[]; } output_data;
+
+uint spk_global_index() {
+    return gl_GlobalInvocationID.y * (gl_NumWorkGroups.x * gl_WorkGroupSize.x) + gl_GlobalInvocationID.x;
+}
+
+void main() {
+    uint t = spk_global_index();
+    uint height = meta.value[0], width = meta.value[1];
+    uint accumulate = meta.value[2], axis = meta.value[3];
+    uint threads = axis == 0u ? width * 3u : height * 3u;
+    if (t >= threads) return;
+    uint channel = t % 3u, line = t / 3u;
+    uint length = axis == 0u ? height : width;
+    uint stride = axis == 0u ? width * 3u : 3u;
+    uint base = axis == 0u ? line * 3u + channel : line * width * 3u + channel;
+    float B  = coefficients.value[8u * channel];
+    float B1 = coefficients.value[8u * channel + 2u];
+    float B2 = coefficients.value[8u * channel + 4u];
+    float B3 = coefficients.value[8u * channel + 6u];
+    float mw = mix_weights.value[channel];
+    if (active_channels.value[channel] == 0u) {
+        uint idx = base;
+        if (accumulate != 0u) {
+            for (uint i = 0u; i < length; ++i) {
+                output_data.value[idx] = accumulator.value[idx] + mw * image_data.value[idx];
+                idx += stride;
+            }
+        } else {
+            for (uint i = 0u; i < length; ++i) {
+                output_data.value[idx] = image_data.value[idx];
+                idx += stride;
+            }
+        }
+        return;
+    }
+    float x0 = image_data.value[base];
+    float w1 = x0, w2 = x0, w3 = x0;
+    uint idx = base;
+    for (uint i = 0u; i < length; ++i) {
+        float v = B * image_data.value[idx] + B1 * w1 + B2 * w2 + B3 * w3;
+        output_data.value[idx] = v;
+        w3 = w2; w2 = w1; w1 = v;
+        idx += stride;
+    }
+    idx -= stride;
+    float xn = output_data.value[idx];
+    float y1 = xn, y2 = xn, y3 = xn;
+    if (accumulate != 0u) {
+        for (int i = int(length) - 1; i >= 0; --i) {
+            float v = B * output_data.value[idx] + B1 * y1 + B2 * y2 + B3 * y3;
+            output_data.value[idx] = accumulator.value[idx] + mw * v;
+            y3 = y2; y2 = y1; y1 = v;
+            idx -= stride;
+        }
+    } else {
+        for (int i = int(length) - 1; i >= 0; --i) {
+            float v = B * output_data.value[idx] + B1 * y1 + B2 * y2 + B3 * y3;
+            output_data.value[idx] = v;
+            y3 = y2; y2 = y1; y1 = v;
+            idx -= stride;
+        }
+    }
+}

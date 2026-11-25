@@ -12,6 +12,7 @@ import { horizontalAdjustment } from '../common/InteractionRules';
 import { AppLog } from '../common/AppLog';
 import { AppReviewService } from '../common/AppReviewService';
 import { exportMime, exportExtension } from '../common/ExportFormat';
+import { isFastExport, normalizeExportQuality } from '../common/ExportQuality';
 import { straightPhotoPixels } from '../common/PhotoPixels';
 import { rawPreviewRotation, orientedPixelMap } from '../common/RawOrientation';
 import { BusinessError } from '@kit.BasicServicesKit';
@@ -131,9 +132,10 @@ interface Stock {
 }
 @Concurrent
 function renderPixels(path: string, input: ArrayBuffer, width: number, height: number,
-  params: string, linear: boolean, rotation: number, geometry: PhotoGeometry, operation: number): image.PixelMap {
-  const rgba = linear ? nativeEngine.renderLinear(path, input, width, height, params, operation) :
-    nativeEngine.render(path, input, width, height, params, operation);
+  params: string, linear: boolean, rotation: number, geometry: PhotoGeometry, operation: number,
+  fastMode: boolean): image.PixelMap {
+  const rgba = linear ? nativeEngine.renderLinear(path, input, width, height, params, operation, fastMode) :
+    nativeEngine.render(path, input, width, height, params, operation, fastMode);
   return geometryMap(rgba, width, height, rotation, geometry);
 }
 
@@ -152,9 +154,14 @@ function decodeRaw(fd: number, cacheDir: string, operation: number): RawFrame {
 }
 
 @Concurrent
+function predecodeRaw(fd: number, cacheDir: string, operation: number, fastMode: boolean): boolean {
+  return nativeEngine.predecodeRaw(fd, cacheDir, operation, fastMode);
+}
+
+@Concurrent
 function renderRawPrint(path: string, fd: number, params: string, cacheDir: string, rotation: number,
-  geometry: PhotoGeometry, operation: number): image.PixelMap {
-  const frame = nativeEngine.renderRaw(path, fd, params, cacheDir, operation);
+  geometry: PhotoGeometry, operation: number, fastMode: boolean): image.PixelMap {
+  const frame = nativeEngine.renderRaw(path, fd, params, cacheDir, operation, fastMode);
   return geometryMap(frame.pixels, frame.width, frame.height, rotation, geometry);
 }
 
@@ -189,6 +196,7 @@ struct LeaveEditorDialog {
 @Component
 struct Index {
   @StorageProp('exportFormat') private exportFormat: string = 'JPEG';
+  @StorageProp('exportQuality') private exportQuality: string = 'HIGH';
   @StorageProp('darkroomTop') private topInset: number = 0;
   @StorageProp('darkroomBottom') private bottomInset: number = 0;
   @StorageProp('darkroomLeft') private leftInset: number = 0;
@@ -214,20 +222,80 @@ struct Index {
 
   private editorActive: boolean = false;
   private reviewTimer: number = -1;
+  private predecodeTimer: number = -1;
+  private predecodeOperation: number = 0;
+  private predecodeRevision: number = 0;
 
   aboutToAppear(): void { this.editorActive = true; this.prepare(); }
+
+  onPageShow(): void {
+    if (this.editorActive && this.linear && this.sourceUri && !this.importing && !this.exportAttempt) {
+      this.scheduleRawPredecode(200);
+    }
+  }
 
   onPageHide(): void { this.cancelReviewPrompt(); }
 
   aboutToDisappear(): void {
     this.editorActive = false;
     this.cancelReviewPrompt();
+    this.cancelRawPredecode();
     this.stopImport();
     this.importRevision++;
     this.stopPreview(false);
     if (this.exportAttempt && !this.exportAttempt.committing) this.finishSaveConfirmation(true);
     this.resumeSaveAuthorization();
     this.releaseNativeResources();
+  }
+
+  private cancelRawPredecode(): void {
+    if (this.predecodeTimer !== -1) {
+      clearTimeout(this.predecodeTimer);
+      this.predecodeTimer = -1;
+    }
+    this.predecodeRevision++;
+    if (this.predecodeOperation) {
+      nativeEngine.cancelOperation(this.predecodeOperation);
+    }
+  }
+
+  private scheduleRawPredecode(delayMs: number = 350): void {
+    this.cancelRawPredecode();
+    if (!this.editorActive || !this.linear || !this.sourceUri || this.importing || this.exportAttempt) return;
+    const revision = this.predecodeRevision;
+    const uri = this.sourceUri;
+    const quality = normalizeExportQuality(this.exportQuality);
+    const fastExport = isFastExport(quality);
+    this.predecodeTimer = setTimeout(() => {
+      this.predecodeTimer = -1;
+      if (revision !== this.predecodeRevision || !this.editorActive || !this.linear ||
+        this.sourceUri !== uri || this.importing || this.exportAttempt) return;
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const cacheDir = ctx.cacheDir;
+      const op = nativeEngine.beginOperation();
+      this.predecodeOperation = op;
+      const started = Date.now();
+      let file: fs.File | undefined;
+      try {
+        file = fs.openSync(uri, fs.OpenMode.READ_ONLY);
+        const task = new taskpool.Task(predecodeRaw, file.fd, cacheDir, op, fastExport);
+        void taskpool.execute(task, taskpool.Priority.LOW).then((ok: Object) => {
+          if (ok === true && revision === this.predecodeRevision && this.sourceUri === uri) {
+            AppLog.record('RAW predecode ready quality=' + quality + ' ms=' + (Date.now() - started));
+          }
+        }).catch(() => {
+          // Ignore background pre-decode cancellations and errors; Save will decode if needed.
+        }).finally(() => {
+          try { if (file) fs.closeSync(file); } catch (_) {}
+          nativeEngine.endOperation(op);
+          if (this.predecodeOperation === op) this.predecodeOperation = 0;
+        });
+      } catch (_) {
+        try { if (file) fs.closeSync(file); } catch (_) {}
+        nativeEngine.endOperation(op);
+        if (this.predecodeOperation === op) this.predecodeOperation = 0;
+      }
+    }, delayMs);
   }
 
   private releaseNativeResources(): void {
@@ -255,7 +323,14 @@ struct Index {
         monochrome: false, targetPrint: DEFAULT_PAPER});
       this.loadMaterialOrder(ctx);
       const dir = ctx.filesDir + '/assets-v1';
-      if (!fs.accessSync(dir + '/ready')) {
+      const readyPath = dir + '/ready';
+      const stamp = decoder.decodeWithStream(await rm.getRawFileContent('engine-stamp.txt')).trim();
+      let currentStamp = '';
+      if (fs.accessSync(readyPath)) {
+        try { currentStamp = fs.readTextSync(readyPath).trim(); } catch (_) { currentStamp = ''; }
+      }
+      if (!stamp || currentStamp !== stamp) {
+        if (fs.accessSync(readyPath)) fs.unlinkSync(readyPath);
         const list = decoder.decodeWithStream(await rm.getRawFileContent('engine-files.txt')).trim().split('\n');
         for (const name of list) {
           const target = dir + '/' + name;
@@ -268,7 +343,8 @@ struct Index {
             if (fs.writeSync(file.fd, bytes.slice().buffer) !== bytes.byteLength) throw new Error('资源写入不完整');
           } finally { fs.closeSync(file); }
         }
-        fs.closeSync(fs.openSync(dir + '/ready', fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY));
+        const marker = fs.openSync(readyPath, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+        try { fs.writeSync(marker.fd, stamp); } finally { fs.closeSync(marker); }
       }
       this.assets = dir + '/engine';
       AppLog.record('assets ready');
@@ -342,21 +418,22 @@ struct Index {
     return this.films.find((stock: Stock) => stock.id === id)!;
   }
 
-  private params(film: string, paper: string, linear: boolean, fullSize: boolean = false): string {
+  // Native full-resolution exports automatically enable 256-row striping above 26 MP.
+  private params(film: string, paper: string, linear: boolean): string {
     return JSON.stringify({ product_defaults: true, film_stock: film, print_stock: paper, scan_film: this.filmProfile(film).reversal,
       exposure_compensation_ev: this.values[0], grain_active: true, grain_amount: this.values[1],
       halation_active: true, halation_amount: this.values[2], glare_active: true, glare_amount: this.values[3],
       auto_exposure: true, auto_exposure_method: 'balanced',
       input_color_space: linear ? 'ProPhoto RGB' : 'sRGB', input_cctf_decoding: !linear,
       output_color_space: 'sRGB', output_cctf_encoding: true,
-      striped: fullSize, strip_rows: fullSize ? 256 : 0 });
+      striped: false, strip_rows: 0 });
   }
 
   private async pixels(input: ArrayBuffer, w: number, h: number, linear: boolean,
     film: string, paper: string, operation: number): Promise<image.PixelMap> {
     const pixels = input.slice(0);
     const task = new taskpool.Task(renderPixels, this.assets, pixels, w, h,
-      this.params(film, paper, linear), linear, this.rawRotation, fullPhoto(), operation);
+      this.params(film, paper, linear), linear, this.rawRotation, fullPhoto(), operation, true);
     task.setTransferList([pixels]);
     return await taskpool.execute(task) as image.PixelMap;
   }
@@ -366,7 +443,7 @@ struct Index {
     try {
       const info = await source.getImageInfo();
       if (cancelled()) throw new Error('Photo decode cancelled');
-      const scale = preview ? Math.min(1, 2048 / Math.max(info.size.width, info.size.height)) : 1;
+      const scale = preview ? Math.min(1, 1600 / Math.max(info.size.width, info.size.height)) : 1;
       const size: image.Size = { width: Math.max(1, Math.round(info.size.width * scale)),
         height: Math.max(1, Math.round(info.size.height * scale)) };
       const map = await source.createPixelMap({ desiredSize: size, editable: true,
@@ -704,6 +781,7 @@ struct Index {
     const operation = nativeEngine.beginOperation();
     this.importOperation = operation;
     let imported = false;
+    let raw = false;
     try {
       if (recipe && (!this.films.some((stock: Stock) => stock.id === recipe.film) ||
         !this.papers.some((stock: Stock) => stock.id === recipe.paper))) {
@@ -713,7 +791,7 @@ struct Index {
       const name = new fileUri.FileUri(uri).name;
       const knownPhoto = /\.(jpe?g|png|heic|heif|webp|gif|bmp|avif)$/i.test(name);
       const knownRaw = /\.(dng|cr[23w]|nef|nrw|arw|srf|sr2|raf|rw2|orf|pef|ptx|3fr|fff|iiq|rwl|srw|x3f|mrw|mos|kdc|dcr|erf|mef|raw)$/i.test(name);
-      let raw = false;
+      this.cancelRawPredecode();
       await resourceCleanup;
       if (!this.currentImport(revision)) return;
       await taskpool.execute(new taskpool.Task(clearNativeResources, false));
@@ -782,6 +860,9 @@ struct Index {
       if (!this.filmProfile(recipe.film).monochrome) this.lastColorPaper = recipe.paper;
       AppLog.record('home recipe ' + recipe.id + ' ' + recipe.film + ' ' + recipe.paper);
       await this.process();
+    }
+    if (imported && raw && this.editorActive && this.sourceUri === uri) {
+      this.scheduleRawPredecode(350);
     }
   }
 
@@ -1031,6 +1112,7 @@ struct Index {
 
   private closePhoto(): void {
     this.hideFan();
+    this.cancelRawPredecode();
     this.stopPreview(false);
     this.releaseNativeResources();
     this.input = undefined;
@@ -1089,21 +1171,23 @@ struct Index {
     return true;
   }
   private async renderOriginal(params: string | undefined, geometry: PhotoGeometry,
-    attempt: ExportAttempt): Promise<image.PixelMap | undefined> {
+    attempt: ExportAttempt, fastExport: boolean): Promise<image.PixelMap | undefined> {
     const cacheDir = (this.getUIContext().getHostContext() as common.UIAbilityContext).cacheDir;
     const source = fs.openSync(this.sourceUri, fs.OpenMode.READ_ONLY);
     try {
       if (this.linear) {
         return await taskpool.execute(new taskpool.Task(renderRawPrint, this.assets, source.fd, params ?? '', cacheDir,
-          this.rawRotation, geometry, attempt.nativeOperation), taskpool.Priority.HIGH) as image.PixelMap;
+          this.rawRotation, geometry, attempt.nativeOperation, fastExport), taskpool.Priority.HIGH) as image.PixelMap;
       }
       const frame = await this.readPhoto(source.fd, false, () => attempt.cancelled);
       if (attempt.cancelled) return undefined;
       if (params === undefined) {
         return geometryMap(frame.pixels, frame.width, frame.height, 0, geometry);
       }
-      return await taskpool.execute(new taskpool.Task(renderPixels, this.assets, frame.pixels,
-        frame.width, frame.height, params, false, 0, geometry, attempt.nativeOperation), taskpool.Priority.HIGH) as image.PixelMap;
+      const task = new taskpool.Task(renderPixels, this.assets, frame.pixels,
+        frame.width, frame.height, params, false, 0, geometry, attempt.nativeOperation, fastExport);
+      task.setTransferList([frame.pixels]);
+      return await taskpool.execute(task, taskpool.Priority.HIGH) as image.PixelMap;
     } finally { fs.closeSync(source); }
   }
 
@@ -1120,6 +1204,10 @@ struct Index {
 
   private async save(): Promise<void> {
     if (!this.canSave()) return;
+    if (this.predecodeTimer !== -1) {
+      clearTimeout(this.predecodeTimer);
+      this.predecodeTimer = -1;
+    }
     const attempt = new ExportAttempt();
     this.exportAttempt = attempt;
     this.busy = true;
@@ -1130,8 +1218,10 @@ struct Index {
     const geometry = framing ? fullPhoto() : this.geometry;
     const title = exportTitle(this.sourceName, this.film, this.paper);
     const filmName = this.borderFilm(this.film);
-    const params = this.hasMaterials() ? this.params(this.film, this.paper, this.linear, true) : undefined;
-    AppLog.record('export start');
+    const quality = normalizeExportQuality(this.exportQuality);
+    const fastExport = isFastExport(quality);
+    const params = this.hasMaterials() ? this.params(this.film, this.paper, this.linear) : undefined;
+    AppLog.record('export start quality=' + quality);
     let print: image.PixelMap | undefined;
     let framed: image.PixelMap | undefined;
     let overlay: image.PixelMap | undefined;
@@ -1146,7 +1236,7 @@ struct Index {
       const extension = exportExtension(mime);
       const renderStarted = Date.now();
       attempt.nativeOperation = nativeEngine.beginOperation();
-      print = await this.renderOriginal(params, geometry, attempt);
+      print = await this.renderOriginal(params, geometry, attempt, fastExport);
       if (!print || attempt.cancelled) return;
       AppLog.record('export render ms=' + (Date.now() - renderStarted));
       AppLog.record('export border ' + (border.id || 'none'));

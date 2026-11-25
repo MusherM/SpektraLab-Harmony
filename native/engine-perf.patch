@@ -1,0 +1,56 @@
+--- a/engine.cpp
++++ b/engine.cpp
+@@ -1054,6 +1054,10 @@
+         // persistent, and another copy of a 45 MP frame is 543 MB.
+         state.image = full;
+     } else {
++#if !defined(__APPLE__) || defined(SPK_VULKAN_BACKEND)
++        // On Vulkan, BufferRef keeps scaled.buf live across frames without a second copy.
++        state.image = scaled;
++#else
+         // The downscale ran in the frame arena; copy the result into a
+         // persistent buffer, because a tier image outlives the render that
+         // built it and every subsequent render reads it.
+@@ -1064,6 +1068,7 @@
+         if (!kept.buf || !gpu->copy(kept.buf.get(), 0, scaled.buf.get(), 0,
+                                     scaled.bytes(), error)) return false;
+         state.image = kept;
++#endif
+     }
+     state.image_long_edge = edge;
+     out = state.image;
+@@ -1156,6 +1161,14 @@
+     // has to outlive the frame arena. Copying it here is also what makes a
+     // reprint grain-consistent for free: the realisation is baked in and is
+     // never redrawn.
++#if !defined(__APPLE__) || defined(SPK_VULKAN_BACKEND)
++    // On Vulkan, alloc_file_backed is identical to alloc_persistent; keeping negative.buf
++    // directly avoids a full-frame allocation, flush, and device copy while BufferRef keeps it live.
++    state.negative = negative;
++    state.has_negative = true;
++    out = negative;
++    return true;
++#else
+     gpu::Gpu* gpu = session->engine->gpu;
+     if (!gpu->flush(error)) return false;
+     Image kept;
+@@ -1170,6 +1183,7 @@
+     state.has_negative = true;
+     out = kept;
+     return true;
++#endif
+ }
+ 
+ // The rgba16 result: a fresh buffer with texture-aligned rows, a texture over
+@@ -1189,7 +1203,11 @@
+     const uint32_t align = gpu->texture_row_alignment_px();
+     const uint32_t stride = ((rgb.w + align - 1) / align) * align;
+     const size_t bytes = size_t(stride) * rgb.h * 4 * sizeof(uint16_t);
++#if !defined(__APPLE__) || defined(SPK_VULKAN_BACKEND)
++    gpu::BufferRef buffer = gpu->alloc(bytes, error);
++#else
+     gpu::BufferRef buffer = gpu->alloc_persistent(bytes, error);
++#endif
+     if (!buffer) return false;
+ 
+     const uint32_t meta[3] = {uint32_t(rgb.pixels()), rgb.w, stride};

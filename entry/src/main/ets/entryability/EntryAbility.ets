@@ -1,4 +1,5 @@
 import { AppLog } from '../common/AppLog';
+import { normalizeExportQuality } from '../common/ExportQuality';
 import { UIAbility, Want } from '@kit.AbilityKit';
 import BuildProfile from 'BuildProfile';
 import { preferences } from '@kit.ArkData';
@@ -21,7 +22,12 @@ export default class EntryAbility extends UIAbility {
       const settings = preferences.getPreferencesSync(this.context, {name: 'settings'});
       const format = settings.getSync('exportFormat', 'JPEG') as string;
       AppStorage.setOrCreate('exportFormat', ['JPEG', 'PNG', 'HEIF'].includes(format) ? format : 'JPEG');
-    } catch (_) { AppStorage.setOrCreate('exportFormat', 'JPEG'); }
+      const quality = settings.getSync('exportQuality', 'HIGH') as string;
+      AppStorage.setOrCreate('exportQuality', normalizeExportQuality(quality));
+    } catch (_) {
+      AppStorage.setOrCreate('exportFormat', 'JPEG');
+      AppStorage.setOrCreate('exportQuality', 'HIGH');
+    }
     const main = stage.getMainWindowSync();
     try {
       await main.setWindowLayoutFullScreen(true);

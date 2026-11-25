@@ -4,6 +4,9 @@
 #include <cstdint>
 #include <array>
 #include <vector>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace harmony_raw {
 inline std::array<double, 3> display_linear(const float* rgb) {
@@ -20,12 +23,48 @@ inline double display_gain(const std::vector<float>& rgb) {
     constexpr size_t bins = 65536;
     std::vector<std::array<size_t, 3>> histogram(bins);
     size_t count = 0;
-    for (size_t i = 0; i + 2 < rgb.size(); i += 3) {
-        const auto linear = display_linear(rgb.data() + i);
-        if (!std::isfinite(linear[0]) || !std::isfinite(linear[1]) || !std::isfinite(linear[2])) continue;
-        for (size_t c = 0; c < 3; ++c)
-            ++histogram[size_t(std::clamp(linear[c], 0.0, 1.0) * (bins - 1))][c];
-        ++count;
+#ifdef _OPENMP
+    const size_t pixels = rgb.size() / 3;
+    const int threads = pixels >= 65536 ? std::min(8, omp_get_max_threads()) : 1;
+    if (threads > 1) {
+        std::vector<std::vector<std::array<uint32_t, 3>>> local_hists(
+            static_cast<size_t>(threads), std::vector<std::array<uint32_t, 3>>(bins));
+        std::vector<size_t> local_counts(size_t(threads), 0);
+#pragma omp parallel num_threads(threads)
+        {
+            const int tid = omp_get_thread_num();
+            auto& lh = local_hists[size_t(tid)];
+            size_t lc = 0;
+            const size_t start = (pixels * size_t(tid)) / size_t(threads);
+            const size_t end = (pixels * size_t(tid + 1)) / size_t(threads);
+            for (size_t p = start; p < end; ++p) {
+                const auto linear = display_linear(rgb.data() + p * 3);
+                if (!std::isfinite(linear[0]) || !std::isfinite(linear[1]) || !std::isfinite(linear[2])) continue;
+                for (size_t c = 0; c < 3; ++c)
+                    ++lh[size_t(std::clamp(linear[c], 0.0, 1.0) * (bins - 1))][c];
+                ++lc;
+            }
+            local_counts[size_t(tid)] = lc;
+        }
+        for (int t = 0; t < threads; ++t) {
+            count += local_counts[size_t(t)];
+            const auto& lh = local_hists[size_t(t)];
+            for (size_t b = 0; b < bins; ++b) {
+                histogram[b][0] += lh[b][0];
+                histogram[b][1] += lh[b][1];
+                histogram[b][2] += lh[b][2];
+            }
+        }
+    } else
+#endif
+    {
+        for (size_t i = 0; i + 2 < rgb.size(); i += 3) {
+            const auto linear = display_linear(rgb.data() + i);
+            if (!std::isfinite(linear[0]) || !std::isfinite(linear[1]) || !std::isfinite(linear[2])) continue;
+            for (size_t c = 0; c < 3; ++c)
+                ++histogram[size_t(std::clamp(linear[c], 0.0, 1.0) * (bins - 1))][c];
+            ++count;
+        }
     }
     if (!count) return 1.0;
     size_t white = 0;

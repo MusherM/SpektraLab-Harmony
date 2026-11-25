@@ -1,0 +1,30 @@
+#version 450
+// 2x2 area-average box downsample for Tier B half-resolution blur mixtures.
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0, std430) readonly buffer Src { float v[]; } src_data;
+layout(set = 0, binding = 1, std430) readonly buffer Meta { uint v[]; } meta;
+layout(set = 0, binding = 2, std430) writeonly buffer Dst { float v[]; } dst_data;
+
+uint spk_global_index() {
+    return gl_GlobalInvocationID.y * (gl_NumWorkGroups.x * gl_WorkGroupSize.x) + gl_GlobalInvocationID.x;
+}
+
+void main() {
+    uint sh = meta.v[0], sw = meta.v[1], dh = meta.v[2], dw = meta.v[3];
+    uint idx = spk_global_index();
+    if (idx >= dh * dw) return;
+    uint dy = idx / dw;
+    uint dx = idx - dy * dw;
+    uint y0 = min(dy * 2u, sh - 1u);
+    uint y1 = min(y0 + 1u, sh - 1u);
+    uint x0 = min(dx * 2u, sw - 1u);
+    uint x1 = min(x0 + 1u, sw - 1u);
+    uint i00 = (y0 * sw + x0) * 3u;
+    uint i01 = (y0 * sw + x1) * 3u;
+    uint i10 = (y1 * sw + x0) * 3u;
+    uint i11 = (y1 * sw + x1) * 3u;
+    uint o = idx * 3u;
+    dst_data.v[o]      = 0.25 * (src_data.v[i00]      + src_data.v[i01]      + src_data.v[i10]      + src_data.v[i11]);
+    dst_data.v[o + 1u] = 0.25 * (src_data.v[i00 + 1u] + src_data.v[i01 + 1u] + src_data.v[i10 + 1u] + src_data.v[i11 + 1u]);
+    dst_data.v[o + 2u] = 0.25 * (src_data.v[i00 + 2u] + src_data.v[i01 + 2u] + src_data.v[i10 + 2u] + src_data.v[i11 + 2u]);
+}

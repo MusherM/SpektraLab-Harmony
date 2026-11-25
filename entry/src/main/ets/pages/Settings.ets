@@ -4,6 +4,12 @@ import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { VersionTapSequence } from '../common/InteractionRules';
 import { AppUpdates } from './AppUpdates';
+import {
+  EXPORT_QUALITY_OPTIONS,
+  ExportQuality,
+  exportQualityDescription,
+  exportQualityLabel,
+} from '../common/ExportQuality';
 
 const REPOSITORY = 'https://github.com/JamesQiu2005/SpektraLab';
 
@@ -11,6 +17,7 @@ const REPOSITORY = 'https://github.com/JamesQiu2005/SpektraLab';
 @Component
 struct Settings {
   @StorageLink('exportFormat') private exportFormat: string = 'JPEG';
+  @StorageLink('exportQuality') private exportQuality: string = 'HIGH';
   @State private supportedFormats: string[] = [];
   private flushingFormat: boolean = false;
   private formatRevision: number = 0;
@@ -61,6 +68,31 @@ struct Settings {
     this.flushingFormat = false;
   }
 
+  private async selectQuality(quality: ExportQuality): Promise<void> {
+    if (this.exportQuality === quality && !this.message) return;
+    this.message = '';
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    let settings: preferences.Preferences;
+    try {
+      settings = preferences.getPreferencesSync(context, {name: 'settings'});
+      settings.putSync('exportQuality', quality);
+      this.exportQuality = quality;
+      this.formatRevision++;
+    } catch (_) {
+      this.message = '设置保存失败，请重试';
+      return;
+    }
+    if (this.flushingFormat) return;
+    this.flushingFormat = true;
+    let flushed: number;
+    do {
+      flushed = this.formatRevision;
+      try { await settings.flush(); }
+      catch (_) { if (flushed === this.formatRevision) this.message = '设置保存失败，请重试'; }
+    } while (flushed !== this.formatRevision);
+    this.flushingFormat = false;
+  }
+
   build() {
     Column() {
       Row({space: 16}) {
@@ -84,6 +116,17 @@ struct Settings {
           if (this.supportedFormats.length > 0 && !this.supported('HEIF')) {
             Text('当前设备不支持 HEIF 编码').fontSize(14).fontColor('#B8B5AF')
           }
+          Text('导出画质').fontSize(18).fontWeight(FontWeight.Medium).fontColor('#F1EDE7').margin({top: 8})
+          Row({space: 10}) {
+            ForEach(EXPORT_QUALITY_OPTIONS, (quality: ExportQuality) => {
+              Button(exportQualityLabel(quality), {type: ButtonType.Normal})
+                .layoutWeight(1).height(44).borderRadius(10)
+                .backgroundColor(this.exportQuality === quality ? '#EFBD70' : '#303032')
+                .fontColor(this.exportQuality === quality ? '#32271D' : '#ECEAE5')
+                .onClick(() => { this.selectQuality(quality); })
+            })
+          }.width('100%')
+          Text(exportQualityDescription(this.exportQuality)).fontSize(14).fontColor('#B8B5AF')
           Divider().color('#454446').margin({top: 8, bottom: 8})
           Text('关于 SpektraLab').fontSize(18).fontWeight(FontWeight.Medium).fontColor('#F1EDE7')
           Text('版本 ' + this.versionName).fontSize(16).fontColor('#ECEAE5')
